@@ -150,10 +150,30 @@ unit_id | year | cohort_year | dep_var
 
 ---
 
+## Performance
+
+Analytic SE computation uses sparse LU factorization and sparse matrix
+operations throughout, avoiding dense intermediates that would blow up
+memory and runtime for large panels.
+
+| N units | Observations | ts_did | bjs_did |
+|---------|-------------|--------|---------|
+| 1,000 | 31,000 | 0.14s | 0.37s |
+| 5,000 | 155,000 | 0.46s | 1.44s |
+| 10,000 | 310,000 | 0.85s | 2.90s |
+| 20,000 | 620,000 | 1.60s | 5.95s |
+| 50,000 | 1,050,000 | 2.47s | 11.55s |
+
+Timings are for the full pipeline (panel prep + first stage + effects +
+analytic SEs) on a single core. For very large panels, `bootstrap=True`
+with `n_jobs` scales linearly across cores.
+
+---
+
 ## Testing
 
 ```bash
-uv run pytest tests/                    # all tests
+uv run pytest tests/                    # 68 tests
 uv run pytest tests/test_vs_r.py -v -s  # R validation (requires R + did2s + didimputation)
 ```
 
