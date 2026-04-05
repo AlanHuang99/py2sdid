@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+*.egg
+.eggs/
+ref/
+.dev/
+docs/
+CLAUDE.md
+benchmarks/output/
+benchmarks/*.html
+benchmarks/*.csv
