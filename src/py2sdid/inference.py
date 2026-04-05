@@ -109,11 +109,16 @@ def compute_se_did2s(
     gamma_hat = robust_solve(X10tX10, X1tX2)
 
     # IF_fs: first-stage contribution
-    if sp.issparse(X10w):
-        X10w_arr = X10w.toarray()
-    else:
-        X10w_arr = np.asarray(X10w)
-    IF_fs = X2tX2_inv @ gamma_hat.T @ (X10w_arr * u_w[:, None]).T  # (K2, n_obs)
+    # Key optimization: keep X10w sparse.  Compute (X10w * u_w) @ gamma
+    # as sparse @ dense, which is O(nnz * K2) instead of O(n_obs * p * K2).
+    X10w_u = X10w.multiply(u_w[:, None]) if sp.issparse(X10w) else X10w * u_w[:, None]
+    # (X10w_u @ gamma_hat) = (n_obs, p) @ (p, K2) = (n_obs, K2)
+    temp = X10w_u @ gamma_hat  # sparse @ dense → dense
+    if sp.issparse(temp):
+        temp = np.asarray(temp.toarray())
+    elif not isinstance(temp, np.ndarray):
+        temp = np.asarray(temp)
+    IF_fs = X2tX2_inv @ temp.T  # (K2, K2) @ (K2, n_obs) = (K2, n_obs)
 
     IF = IF_fs - IF_ss  # (K2, n_obs)
 
@@ -134,7 +139,12 @@ def compute_se_did2s(
     if sp.issparse(X1tX2_static):
         X1tX2_static = X1tX2_static.toarray()
     gamma_hat_static = robust_solve(X10tX10, X1tX2_static)
-    IF_fs_static = X2stX2s_inv @ gamma_hat_static.T @ (X10w_arr * u_w[:, None]).T
+    temp_static = X10w_u @ gamma_hat_static  # reuse sparse X10w_u
+    if sp.issparse(temp_static):
+        temp_static = np.asarray(temp_static.toarray())
+    elif not isinstance(temp_static, np.ndarray):
+        temp_static = np.asarray(temp_static)
+    IF_fs_static = X2stX2s_inv @ temp_static.T
     IF_static = IF_fs_static - IF_ss_static
     vcov_static = _cluster_vcov(IF_static, panel.cluster)
     att_avg_se = float(np.sqrt(vcov_static[0, 0]))
@@ -569,12 +579,21 @@ def _cluster_vcov(IF: np.ndarray, cluster: np.ndarray) -> np.ndarray:
     (K, K) array
     """
     K = IF.shape[0]
-    vcov = np.zeros((K, K), dtype=np.float64)
-    for c in np.unique(cluster):
-        mask = cluster == c
-        IF_c = IF[:, mask].sum(axis=1, keepdims=True)  # (K, 1)
-        vcov += IF_c @ IF_c.T
-    return vcov
+    unique_clusters = np.unique(cluster)
+    n_cl = len(unique_clusters)
+
+    # Vectorized: sum IF within each cluster using bincount
+    # cluster_sums[k, c] = sum of IF[k, i] for i in cluster c
+    cluster_sums = np.zeros((K, n_cl), dtype=np.float64)
+    # Map cluster IDs to 0..n_cl-1
+    cl_map = {c: j for j, c in enumerate(unique_clusters)}
+    cl_idx = np.array([cl_map[c] for c in cluster])
+
+    for k in range(K):
+        cluster_sums[k] = np.bincount(cl_idx, weights=IF[k], minlength=n_cl)
+
+    # vcov = cluster_sums @ cluster_sums.T
+    return cluster_sums @ cluster_sums.T
 
 
 def _recenter_adj(

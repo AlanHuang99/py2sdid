@@ -111,10 +111,23 @@ def _solve_sparse(A: sp.spmatrix, b: np.ndarray) -> np.ndarray:
 
 
 def _solve_dense(A: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Solve via direct then SVD fallback."""
-    try:
-        if A.shape[0] == A.shape[1]:
+    """Solve via Cholesky (for symmetric PD), then LU, then SVD fallback."""
+    import warnings
+    import scipy.linalg
+    if A.shape[0] == A.shape[1]:
+        try:
+            # X'X matrices are symmetric positive (semi-)definite — Cholesky
+            # is ~2x faster than general LU and numerically stable.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", scipy.linalg.LinAlgWarning)
+                return scipy.linalg.solve(A, b, assume_a="pos")
+        except (np.linalg.LinAlgError, scipy.linalg.LinAlgError):
+            pass
+        try:
             return np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            return _pinv_solve(A, b)
+    try:
         return np.linalg.lstsq(A, b, rcond=None)[0]
     except np.linalg.LinAlgError:
         return _pinv_solve(A, b)
