@@ -208,3 +208,222 @@ def df_small() -> pl.DataFrame:
         te_m3=0,
         seed=123,
     )
+
+
+# ---------------------------------------------------------------------------
+# Repeated cross-section DGP
+# ---------------------------------------------------------------------------
+
+def gen_rcs_data(
+    n_groups: int = 50,
+    n_individuals_per_group_period: int = 20,
+    panel: tuple[int, int] = (2000, 2010),
+    g1: int = 2005,
+    g2: int = 0,
+    te: float = 3.0,
+    te_m: float = 0.0,
+    seed: int = 42,
+) -> pl.DataFrame:
+    """Generate repeated cross-section data with group-level treatment.
+
+    Each period draws a fresh sample of individuals from each group.
+    Individuals do NOT persist across periods — this is the defining
+    feature of RCS data.  Treatment is at the group level.
+
+    Parameters
+    ----------
+    n_groups : int
+        Number of groups (e.g. states, regions).
+    n_individuals_per_group_period : int
+        Individuals sampled per group per period.
+    panel : (int, int)
+        Start and end years (inclusive).
+    g1 : int
+        Treatment onset year for treated groups. Set to 0 for never-treated.
+    g2 : int
+        Second treatment cohort (0 = never-treated).
+    te : float
+        Level treatment effect.
+    te_m : float
+        Slope treatment effect per year post-treatment.
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    pl.DataFrame
+        Columns: individual_id, group, year, g, dep_var
+    """
+    rng = np.random.default_rng(seed)
+    years = list(range(panel[0], panel[1] + 1))
+    n_years = len(years)
+
+    # Assign groups to treatment cohorts
+    # ~half treated at g1, rest never-treated (or g2)
+    group_cohort = np.zeros(n_groups, dtype=np.int64)
+    group_cohort[: n_groups // 2] = g1
+    if g2 > 0:
+        quarter = n_groups // 4
+        group_cohort[quarter : n_groups // 2] = g2
+
+    # Group fixed effects
+    group_fe = rng.normal(loc=0.0, scale=2.0, size=n_groups)
+
+    # Year fixed effects
+    year_fe_vals = rng.normal(loc=0.0, scale=0.5, size=n_years)
+
+    rows_individual = []
+    rows_group = []
+    rows_year = []
+    rows_g = []
+    rows_dep = []
+
+    ind_counter = 0
+    for t_idx, yr in enumerate(years):
+        for grp in range(n_groups):
+            n_ind = n_individuals_per_group_period
+            cohort = int(group_cohort[grp])
+
+            # Treatment effect
+            treat_effect = 0.0
+            if cohort > 0 and yr >= cohort:
+                treat_effect = te + te_m * (yr - cohort)
+
+            for _ in range(n_ind):
+                ind_counter += 1
+                error = rng.normal(0.0, 1.0)
+                y = group_fe[grp] + year_fe_vals[t_idx] + treat_effect + error
+
+                rows_individual.append(ind_counter)
+                rows_group.append(grp + 1)
+                rows_year.append(yr)
+                rows_g.append(cohort)
+                rows_dep.append(y)
+
+    return pl.DataFrame({
+        "individual_id": rows_individual,
+        "group": rows_group,
+        "year": rows_year,
+        "g": rows_g,
+        "dep_var": rows_dep,
+    })
+
+
+@pytest.fixture
+def df_rcs() -> pl.DataFrame:
+    """Repeated cross-section with group-level treatment.
+
+    - 50 groups, 20 individuals/group/period, panel 2000-2010
+    - 25 groups treated at 2005, 25 never-treated
+    - Constant TE = 3
+    """
+    return gen_rcs_data(
+        n_groups=50,
+        n_individuals_per_group_period=20,
+        panel=(2000, 2010),
+        g1=2005,
+        g2=0,
+        te=3.0,
+        te_m=0.0,
+        seed=42,
+    )
+
+
+@pytest.fixture
+def df_rcs_small() -> pl.DataFrame:
+    """Small RCS for fast tests.
+
+    - 10 groups, 10 individuals/group/period, panel 2000-2005
+    - 5 groups treated at 2003, 5 never-treated
+    - TE = 2
+    """
+    return gen_rcs_data(
+        n_groups=10,
+        n_individuals_per_group_period=10,
+        panel=(2000, 2005),
+        g1=2003,
+        g2=0,
+        te=2.0,
+        te_m=0.0,
+        seed=123,
+    )
+
+
+def gen_agg_rcs_data(
+    n_groups: int = 50,
+    panel: tuple[int, int] = (2000, 2010),
+    g1: int = 2005,
+    g2: int = 0,
+    te: float = 3.0,
+    te_m: float = 0.0,
+    n_per_cell: int = 30,
+    seed: int = 42,
+) -> pl.DataFrame:
+    """Generate aggregated repeated cross-section data.
+
+    Each row is a (group, year) cell with the outcome averaged over
+    ``n_per_cell`` individuals.  This is the format users get after
+    collapsing individual-level RCS data to the group-period level.
+
+    Returns
+    -------
+    pl.DataFrame
+        Columns: group, year, g, dep_var
+    """
+    rng = np.random.default_rng(seed)
+    years = list(range(panel[0], panel[1] + 1))
+    n_years = len(years)
+
+    group_cohort = np.zeros(n_groups, dtype=np.int64)
+    group_cohort[: n_groups // 2] = g1
+    if g2 > 0:
+        quarter = n_groups // 4
+        group_cohort[quarter : n_groups // 2] = g2
+
+    group_fe = rng.normal(loc=0.0, scale=2.0, size=n_groups)
+    year_fe_vals = rng.normal(loc=0.0, scale=0.5, size=n_years)
+
+    rows_group = []
+    rows_year = []
+    rows_g = []
+    rows_dep = []
+
+    for t_idx, yr in enumerate(years):
+        for grp in range(n_groups):
+            cohort = int(group_cohort[grp])
+            treat_effect = 0.0
+            if cohort > 0 and yr >= cohort:
+                treat_effect = te + te_m * (yr - cohort)
+
+            # Average over n_per_cell individuals (reduces noise)
+            errors = rng.normal(0.0, 1.0, size=n_per_cell)
+            y = group_fe[grp] + year_fe_vals[t_idx] + treat_effect + errors.mean()
+
+            rows_group.append(grp + 1)
+            rows_year.append(yr)
+            rows_g.append(cohort)
+            rows_dep.append(y)
+
+    return pl.DataFrame({
+        "group": rows_group,
+        "year": rows_year,
+        "g": rows_g,
+        "dep_var": rows_dep,
+    })
+
+
+@pytest.fixture
+def df_agg_rcs() -> pl.DataFrame:
+    """Aggregated RCS (one row per group-period).
+
+    - 50 groups, panel 2000-2010
+    - 25 groups treated at 2005, 25 never-treated
+    - TE = 3, averaged over 30 individuals per cell
+    """
+    return gen_agg_rcs_data(
+        n_groups=50,
+        panel=(2000, 2010),
+        g1=2005,
+        te=3.0,
+        seed=42,
+    )

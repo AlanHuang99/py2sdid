@@ -23,36 +23,59 @@ def prepare_panel(
     tname: str,
     gname: str,
     *,
+    dataset_type: str = "panel",
+    groupname: str | None = None,
     xformla: list[str] | None = None,
     wname: str | None = None,
     cluster_var: str | None = None,
 ) -> PanelData:
     """Convert long-format Polars DataFrame to structured PanelData.
 
+    Supports three configurations:
+
+    1. **Panel** (``dataset_type="panel"``): one row per unit-period,
+       unit fixed effects from ``idname``.
+    2. **Individual-level RCS** (``dataset_type="rcs"``,
+       ``groupname`` provided): individuals sampled once, group FE
+       from ``groupname``.
+    3. **Aggregated RCS** (``dataset_type="rcs"``, no ``groupname``):
+       each row is a group-period aggregate, group FE from ``idname``.
+
     Parameters
     ----------
     data : pl.DataFrame
-        Panel in long format (one row per unit-period).
+        Data in long format.
     yname : str
         Outcome column.
     idname : str
-        Unit identifier column.
+        Unit identifier column (panel) or group identifier column
+        (aggregated RCS).
     tname : str
         Time period column (must be integer-valued).
     gname : str
         Treatment cohort column.  A positive integer indicates the first
         period of treatment; ``0`` or ``null`` means never-treated.
-        Must be constant within each unit.
+        Must be constant within each unit (panel) or group (RCS).
+    dataset_type : str
+        ``"panel"`` or ``"rcs"``.
+    groupname : str, optional
+        Group identifier for individual-level RCS data.  When provided
+        with ``dataset_type="rcs"``, group FE replace unit FE.
     xformla : list[str], optional
         Time-varying covariate column names.
     wname : str, optional
         Observation weight column.
     cluster_var : str, optional
-        Clustering variable (defaults to *idname*).
+        Clustering variable (defaults to *idname* for panels,
+        *groupname* or *idname* for RCS).
     """
+    is_rcs = dataset_type == "rcs"
+
     # -- Validate columns ------------------------------------------------
     required = [yname, idname, tname, gname]
     _check_columns(data, required)
+    if groupname:
+        _check_columns(data, [groupname])
     if xformla:
         _check_columns(data, xformla)
     if wname:
@@ -66,16 +89,47 @@ def prepare_panel(
     # -- Sort for deterministic ordering ---------------------------------
     df = data.sort(idname, tname)
 
-    # -- Validate gname is constant within unit --------------------------
-    _validate_gname_constant(df, idname, gname)
+    # -- Determine the FE grouping variable ------------------------------
+    # Panel:              gname constant within idname, FE from idname
+    # Individual RCS:     gname constant within groupname, FE from groupname
+    # Aggregated RCS:     gname constant within idname, FE from idname
+    if is_rcs and groupname is not None:
+        fe_col = groupname
+    else:
+        fe_col = idname
+    _validate_gname_constant(df, fe_col, gname)
 
     # -- Integer-code identifiers ----------------------------------------
     unit_ids, unit_map = _factorize(df[idname])
     time_ids, time_map = _factorize(df[tname])
 
+    # -- FE identifiers --------------------------------------------------
+    if is_rcs and groupname is not None:
+        # Individual-level RCS: FE from separate group column
+        fe_ids, fe_map = _factorize(df[groupname])
+        n_fe_levels = len(fe_map)
+    elif is_rcs:
+        # Aggregated RCS: FE from idname (idname IS the group)
+        fe_ids = unit_ids
+        fe_map = unit_map
+        n_fe_levels = len(unit_map)
+    else:
+        # Panel: FE from idname (standard unit FE)
+        fe_ids = unit_ids
+        fe_map = unit_map
+        n_fe_levels = None  # defaults to n_units in __post_init__
+
+    # -- Cluster defaults ------------------------------------------------
+    # Panel:           cluster by idname (unit)
+    # Individual RCS:  cluster by groupname (group)
+    # Aggregated RCS:  cluster by idname (group)
     if cluster_var is None:
-        cluster_ids = unit_ids.copy()
-        cluster_map = dict(unit_map)
+        if is_rcs and groupname is not None:
+            cluster_ids = fe_ids.copy()
+            cluster_map = dict(fe_map)
+        else:
+            cluster_ids = unit_ids.copy()
+            cluster_map = dict(unit_map)
     else:
         cluster_ids, cluster_map = _factorize(df[cluster_var])
 
@@ -147,6 +201,10 @@ def prepare_panel(
         unit_map=unit_map,
         time_map=time_map,
         cluster_map=cluster_map,
+        fe_ids=fe_ids,
+        n_fe_levels=n_fe_levels,
+        fe_map=fe_map if is_rcs and groupname is not None else None,
+        is_rcs=is_rcs,
     )
 
 
@@ -177,19 +235,19 @@ def _validate_integer_column(df: pl.DataFrame, col: str) -> None:
     )
 
 
-def _validate_gname_constant(df: pl.DataFrame, idname: str, gname: str) -> None:
-    """Validate that gname is constant within each unit."""
+def _validate_gname_constant(df: pl.DataFrame, group_col: str, gname: str) -> None:
+    """Validate that gname is constant within each unit/group."""
     g_filled = df.with_columns(pl.col(gname).fill_null(0).alias("_g_check"))
     varying = (
-        g_filled.group_by(idname)
+        g_filled.group_by(group_col)
         .agg(pl.col("_g_check").n_unique().alias("_n_g"))
         .filter(pl.col("_n_g") > 1)
     )
     if len(varying) > 0:
-        bad_ids = varying[idname].head(5).to_list()
+        bad_ids = varying[group_col].head(5).to_list()
         raise ValueError(
-            f"Column '{gname}' must be constant within each unit. "
-            f"Units with varying values: {bad_ids}"
+            f"Column '{gname}' must be constant within each '{group_col}'. "
+            f"Values with varying '{gname}': {bad_ids}"
         )
 
 

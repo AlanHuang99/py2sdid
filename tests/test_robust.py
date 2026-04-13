@@ -100,7 +100,7 @@ class TestInputValidation:
             pl.when((pl.col("unit") == 1) & (pl.col("year") > 2005))
             .then(2010).otherwise(pl.col("g")).alias("g")
         ).drop("_idx")
-        with pytest.raises(ValueError, match="constant within each unit"):
+        with pytest.raises(ValueError, match="constant within each"):
             ts_did(bad, yname="dep_var", idname="unit", tname="year",
                    gname="g", verbose=False)
 

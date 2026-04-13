@@ -39,9 +39,10 @@ def estimate_first_stage(
         Apply observation weights if available.
     """
     # -- Design matrix (full sample) -------------------------------------
+    # Use fe_ids (= unit_ids for panel, group_ids for RCS)
     Z_full = build_design_matrix(
-        panel.unit_ids,
-        panel.n_units,
+        panel.fe_ids,
+        panel.n_fe_levels,
         panel.time_ids,
         panel.n_periods,
         panel.X,
@@ -75,11 +76,11 @@ def estimate_first_stage(
     residuals = panel.Y - y_hat
 
     # -- Extract components from beta ------------------------------------
-    n_u = panel.n_units
+    n_fe = panel.n_fe_levels  # n_units for panel, n_groups for RCS
     n_t = panel.n_periods
-    unit_fe = beta[:n_u]
-    time_fe = beta[n_u : n_u + n_t]
-    covar_coefs = beta[n_u + n_t :] if panel.X is not None else None
+    unit_fe = beta[:n_fe]
+    time_fe = beta[n_fe : n_fe + n_t]
+    covar_coefs = beta[n_fe + n_t :] if panel.X is not None else None
 
     # -- Error variance (on control residuals) ---------------------------
     ctrl_resid = residuals[ctrl]
