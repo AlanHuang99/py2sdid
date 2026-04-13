@@ -182,7 +182,9 @@ def compute_se_did2s(
     # -- Overall ATT SE using a single static design column ---------------
     # Mirrors did2s second-stage with a single treatment indicator D_it.
     # Reuses the sparse factorization from above.
-    X2_static = treated.astype(np.float64).reshape(-1, 1)
+    # Exclude singletons from the static treatment indicator.
+    effective_treated = treated & ~panel.is_singleton
+    X2_static = effective_treated.astype(np.float64).reshape(-1, 1)
     X2s = X2_static * w_sqrt[:, None]  # weighted
     X2stX2s = X2s.T @ X2s
     X2stX2s_inv = robust_solve(X2stX2s, np.eye(1))
@@ -292,8 +294,10 @@ def compute_se_bjs(
     # -- Overall ATT SE using a single static weight vector ---------------
     # This matches R didimputation's static SE: one weight column where
     # every treated obs gets w_it / sum(w_treated).
+    # Exclude singletons from the static weight vector.
+    effective_treated = treated & ~panel.is_singleton
     static_wtr = np.zeros((n_obs, 1), dtype=np.float64)
-    static_col = np.where(treated, w, 0.0)
+    static_col = np.where(effective_treated, w, 0.0)
     static_total = static_col.sum()
     if static_total > 0:
         static_wtr[:, 0] = static_col / static_total
@@ -401,6 +405,12 @@ def run_bootstrap(
             unit_map=panel.unit_map,
             time_map=panel.time_map,
             cluster_map=panel.cluster_map,
+            fe_ids=panel.fe_ids[idx],
+            n_fe_levels=panel.n_fe_levels,
+            fe_map=panel.fe_map,
+            is_rcs=panel.is_rcs,
+            is_singleton=panel.is_singleton[idx],
+            n_singletons=int(panel.is_singleton[idx].sum()),
         )
 
         try:
@@ -596,6 +606,7 @@ def _build_second_stage_design(
     Post-treatment columns use treated obs.
     """
     n = panel.n_obs
+    not_singleton = ~panel.is_singleton
     if eff.horizons is not None and len(eff.horizons) > 0:
         K = len(eff.horizons)
         X2 = np.zeros((n, K), dtype=np.float64)
@@ -603,19 +614,20 @@ def _build_second_stage_design(
             if h < 0:
                 # Pre-treatment: not-yet-treated obs of eventually-treated units
                 X2[:, j] = (
-                    ~panel.is_treated
+                    ~panel.is_treated & not_singleton
                     & (panel.cohort > 0)
                     & np.isfinite(panel.event_time)
                     & (panel.event_time == h)
                 ).astype(np.float64)
             else:
-                # Post-treatment: treated obs
+                # Post-treatment: treated obs (exclude singletons)
                 X2[:, j] = (
-                    panel.is_treated & (panel.event_time == h)
+                    panel.is_treated & not_singleton
+                    & (panel.event_time == h)
                 ).astype(np.float64)
         return X2
-    # Static: single treatment column
-    return panel.is_treated.astype(np.float64).reshape(-1, 1)
+    # Static: single treatment column (exclude singletons)
+    return (panel.is_treated & not_singleton).astype(np.float64).reshape(-1, 1)
 
 
 def _cluster_vcov(IF: np.ndarray, cluster: np.ndarray) -> np.ndarray:

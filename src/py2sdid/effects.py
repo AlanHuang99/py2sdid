@@ -34,7 +34,9 @@ def compute_effects(
     # -- Residualized outcome -----------------------------------------------
     y_tilde = panel.Y - fs.y_hat
 
-    treated_mask = panel.is_treated
+    # Exclude singletons (unidentifiable FE groups) from ATT computation
+    not_singleton = ~panel.is_singleton
+    treated_mask = panel.is_treated & not_singleton
     effects_all = y_tilde[treated_mask]
 
     # Weights for treated obs
@@ -47,13 +49,17 @@ def compute_effects(
     att_avg = float(_weighted_mean(effects_all, w_treated))
 
     # -- Discover all relative time periods ---------------------------------
-    # Post-treatment: from treated obs (D==1)
+    # Post-treatment: from treated obs (D==1, not singleton)
     event_treated = panel.event_time[treated_mask]
     finite_post = event_treated[np.isfinite(event_treated)]
     unique_post = np.unique(finite_post).astype(int)
 
     # Pre-treatment: from not-yet-treated obs of eventually-treated units
-    pre_mask_all = ~panel.is_treated & (panel.cohort > 0) & np.isfinite(panel.event_time)
+    # (also exclude singletons)
+    pre_mask_all = (
+        ~panel.is_treated & not_singleton
+        & (panel.cohort > 0) & np.isfinite(panel.event_time)
+    )
     unique_pre = (
         np.unique(panel.event_time[pre_mask_all]).astype(int)
         if pre_mask_all.any()
@@ -73,14 +79,14 @@ def compute_effects(
         if h < 0:
             # Pre-treatment: not-yet-treated obs of eventually-treated units
             mask = (
-                ~panel.is_treated
+                ~panel.is_treated & not_singleton
                 & (panel.cohort > 0)
                 & np.isfinite(panel.event_time)
                 & (panel.event_time == h)
             )
         else:
-            # Post-treatment: treated obs
-            mask = panel.is_treated & (panel.event_time == h)
+            # Post-treatment: treated obs (not singleton)
+            mask = treated_mask & (panel.event_time == h)
 
         count_arr[i] = int(mask.sum())
         if count_arr[i] > 0:
@@ -127,10 +133,11 @@ def _build_weight_matrix(
     """
     n = panel.n_obs
     w = panel.W if panel.W is not None else np.ones(n, dtype=np.float64)
+    not_singleton = ~panel.is_singleton
 
     if len(horizon_vals) == 0:
         wtr = np.zeros((n, 1), dtype=np.float64)
-        col = np.where(panel.is_treated, w, 0.0)
+        col = np.where(panel.is_treated & not_singleton, w, 0.0)
         total = col.sum()
         if total > 0:
             wtr[:, 0] = col / total
@@ -140,13 +147,13 @@ def _build_weight_matrix(
     for j, h in enumerate(horizon_vals):
         if h < 0:
             mask = (
-                ~panel.is_treated
+                ~panel.is_treated & not_singleton
                 & (panel.cohort > 0)
                 & np.isfinite(panel.event_time)
                 & (panel.event_time == h)
             )
         else:
-            mask = panel.is_treated & (panel.event_time == h)
+            mask = panel.is_treated & not_singleton & (panel.event_time == h)
         col = np.where(mask, w, 0.0)
         total = col.sum()
         if total > 0:

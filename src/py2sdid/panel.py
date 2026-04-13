@@ -25,6 +25,7 @@ def prepare_panel(
     *,
     dataset_type: str = "panel",
     groupname: str | None = None,
+    drop_singletons: bool = True,
     xformla: list[str] | None = None,
     wname: str | None = None,
     cluster_var: str | None = None,
@@ -61,6 +62,14 @@ def prepare_panel(
     groupname : str, optional
         Group identifier for individual-level RCS data.  When provided
         with ``dataset_type="rcs"``, group FE replace unit FE.
+    drop_singletons : bool
+        If ``True`` (default), detect and flag observations belonging
+        to FE groups with zero control-subsample observations.  These
+        groups' fixed effects are unidentifiable, so their
+        counterfactuals cannot be estimated.  Flagged observations are
+        excluded from ATT computation and inference, matching the
+        behavior of R ``fixest::predict()`` (NA for unseen FE levels).
+        See Correia (2015).
     xformla : list[str], optional
         Time-varying covariate column names.
     wname : str, optional
@@ -180,6 +189,17 @@ def prepare_panel(
     for c_val in np.unique(unique_uc[:, 1]):
         cohort_sizes[int(c_val)] = int((unique_uc[:, 1] == c_val).sum())
 
+    # -- Singleton detection -----------------------------------------------
+    if drop_singletons:
+        is_singleton, n_singletons = _detect_singletons(
+            is_control, fe_ids, time_ids,
+            n_fe_levels if n_fe_levels is not None else n_units,
+            n_periods,
+        )
+    else:
+        is_singleton = np.zeros(n_obs, dtype=bool)
+        n_singletons = 0
+
     return PanelData(
         Y=Y,
         D=D,
@@ -205,6 +225,8 @@ def prepare_panel(
         n_fe_levels=n_fe_levels,
         fe_map=fe_map if is_rcs and groupname is not None else None,
         is_rcs=is_rcs,
+        is_singleton=is_singleton,
+        n_singletons=n_singletons,
     )
 
 
@@ -249,6 +271,55 @@ def _validate_gname_constant(df: pl.DataFrame, group_col: str, gname: str) -> No
             f"Column '{gname}' must be constant within each '{group_col}'. "
             f"Values with varying '{gname}': {bad_ids}"
         )
+
+
+def _detect_singletons(
+    is_control: np.ndarray,
+    fe_ids: np.ndarray,
+    time_ids: np.ndarray,
+    n_fe_levels: int,
+    n_periods: int,
+) -> tuple[np.ndarray, int]:
+    """Detect FE groups with zero control observations.
+
+    Flags all observations (control and treated) belonging to FE groups
+    that have no control-subsample observations.  These groups' fixed
+    effects cannot be estimated from the control data, so their
+    counterfactuals are unidentifiable and must be excluded from ATT
+    computation and inference.
+
+    This matches the behavior of R ``fixest::predict()`` which returns
+    NA for FE levels not seen in the estimation sample, causing those
+    observations to be dropped from downstream analysis.
+
+    Parameters ``time_ids`` and ``n_periods`` are reserved for future
+    iterative singleton detection across both FE dimensions.
+
+    Returns
+    -------
+    is_singleton : (n_obs,) bool array
+        True for observations that should be excluded.
+    n_singletons : int
+        Total number of flagged observations.
+    """
+    n_obs = len(is_control)
+
+    # Count control observations per FE group
+    ctrl_fe = fe_ids[is_control]
+    fe_ctrl_count = np.bincount(ctrl_fe, minlength=n_fe_levels)
+
+    # Groups with zero control obs → FE is unidentifiable
+    dead_groups = set(np.where(fe_ctrl_count == 0)[0])
+
+    if not dead_groups:
+        return np.zeros(n_obs, dtype=bool), 0
+
+    # Flag ALL observations from dead groups (vectorized)
+    dead_arr = np.fromiter(dead_groups, dtype=np.int64)
+    is_singleton = np.isin(fe_ids, dead_arr)
+    n_singletons = int(is_singleton.sum())
+
+    return is_singleton, n_singletons
 
 
 def _factorize(series: pl.Series) -> tuple[np.ndarray, dict[int, Any]]:

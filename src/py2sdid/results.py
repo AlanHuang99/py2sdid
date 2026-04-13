@@ -65,6 +65,10 @@ class PanelData:
     fe_map: dict[int, Any] | None = None    # FE code -> original label
     is_rcs: bool = False                    # True when groupname was provided
 
+    # Singleton detection (observations excluded from ATT and inference)
+    is_singleton: np.ndarray | None = None  # (n_obs,) bool: True for singleton obs
+    n_singletons: int = 0                   # count of singleton observations dropped
+
     def __post_init__(self) -> None:
         """Default fe_ids to unit_ids for backward compatibility."""
         if self.fe_ids is None:
@@ -73,6 +77,8 @@ class PanelData:
             self.n_fe_levels = self.n_units
         if self.fe_map is None:
             self.fe_map = self.unit_map
+        if self.is_singleton is None:
+            self.is_singleton = np.zeros(self.n_obs, dtype=bool)
 
 
 # ---------------------------------------------------------------------------

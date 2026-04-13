@@ -337,7 +337,8 @@ def _plot_calendar(result: Any, ax: Any, *, title: str | None = None, **kw: Any)
     panel = result.panel
 
     # Use first-stage prediction (includes covariates) for treatment effects
-    treated = panel.is_treated
+    # Exclude singletons (unidentifiable counterfactuals)
+    treated = panel.is_treated & ~panel.is_singleton
     time_vals = panel.time_ids[treated]
     effects = (panel.Y - result.y_hat)[treated]
 

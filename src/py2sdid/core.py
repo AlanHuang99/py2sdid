@@ -32,6 +32,7 @@ def ts_did(
     *,
     dataset_type: str = "panel",
     groupname: str | None = None,
+    drop_singletons: bool = True,
     xformla: list[str] | None = None,
     wname: str | None = None,
     cluster_var: str | None = None,
@@ -86,6 +87,12 @@ def ts_did(
         individual (not a group-period aggregate).  Group fixed
         effects replace unit fixed effects. Must not be provided
         when ``dataset_type="panel"``.
+    drop_singletons : bool
+        If ``True`` (default), detect and exclude observations
+        whose FE group has zero control observations (unidentifiable
+        counterfactuals).  Matches the behavior of R
+        ``fixest::predict()`` and prevents downward SE bias
+        (Correia 2015).
     xformla : list[str], optional
         Time-varying covariate column names to include in the first
         stage alongside fixed effects.
@@ -127,6 +134,7 @@ def ts_did(
         se_method_fn=compute_se_did2s,
         dataset_type=dataset_type,
         groupname=groupname,
+        drop_singletons=drop_singletons,
         xformla=xformla,
         wname=wname,
         cluster_var=cluster_var,
@@ -148,6 +156,7 @@ def bjs_did(
     *,
     dataset_type: str = "panel",
     groupname: str | None = None,
+    drop_singletons: bool = True,
     xformla: list[str] | None = None,
     wname: str | None = None,
     cluster_var: str | None = None,
@@ -179,6 +188,7 @@ def bjs_did(
         se_method_fn=compute_se_bjs,
         dataset_type=dataset_type,
         groupname=groupname,
+        drop_singletons=drop_singletons,
         xformla=xformla,
         wname=wname,
         cluster_var=cluster_var,
@@ -206,6 +216,7 @@ def _run_estimation(
     se_method_fn: Any,
     dataset_type: str,
     groupname: str | None,
+    drop_singletons: bool,
     xformla: list[str] | None,
     wname: str | None,
     cluster_var: str | None,
@@ -246,10 +257,28 @@ def _run_estimation(
         gname=gname,
         dataset_type=dataset_type,
         groupname=groupname,
+        drop_singletons=drop_singletons,
         xformla=xformla,
         wname=wname,
         cluster_var=cluster_var,
     )
+
+    if verbose and panel.n_singletons > 0:
+        print(
+            f"  dropped {panel.n_singletons} observations "
+            f"from FE groups with no control-subsample data",
+            flush=True,
+        )
+
+    # Check that some treated observations remain after singleton removal
+    effective_treated = panel.is_treated & ~panel.is_singleton
+    if not effective_treated.any():
+        raise ValueError(
+            "No treated observations remain after dropping singletons. "
+            "Every FE group with treated observations has zero control "
+            "observations, so no counterfactuals can be estimated. "
+            "Check your data or use drop_singletons=False."
+        )
 
     if verbose:
         n_cohorts = len([c for c in panel.cohort_sizes if c != 0])
