@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "py2sdid"
-version = "0.1.4"
+version = "0.1.5"
 description = "Two-stage DiD and BJS imputation estimator for staggered treatment designs"
 readme = "README.md"
 license = "MIT"

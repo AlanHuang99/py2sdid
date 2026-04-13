@@ -22,7 +22,7 @@ Usage::
 
 """
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 from .core import ts_did, bjs_did
 from .results import DiDResult, DiagnosticResult

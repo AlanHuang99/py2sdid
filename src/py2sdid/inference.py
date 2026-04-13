@@ -33,29 +33,59 @@ from .results import (
 def _robust_factorized(A_sp):
     """Factorize a sparse symmetric matrix for repeated solves.
 
-    Tries sparse LU first (fast for large well-conditioned systems).
-    Falls back to sparse LSQR when rank-deficient (common in RCS data
-    where some groups have no control observations).
-
-    The LSQR fallback stays sparse — no dense allocation — making it
-    feasible for large systems (40K+ groups) where the previous dense
-    pseudo-inverse fallback would exhaust memory.
+    Strategy (cascading):
+    1. Sparse LU on full matrix (fastest when full-rank).
+    2. Drop zero-diagonal columns (singleton FEs), retry sparse LU on
+       the reduced system.
+    3. Sparse LSQR on the reduced system (handles any remaining rank
+       deficiency without dense allocation).
 
     Returns a callable ``solve(b)`` that computes ``A^{-1} b``
-    (or the minimum-norm least-squares solution when rank-deficient).
+    (or the minimum-norm solution when rank-deficient).
     """
+    import scipy.sparse.linalg as _spla
     from scipy.sparse.linalg import factorized as _factorized
+
+    n_full = A_sp.shape[0]
+
+    # Try 1: sparse LU on full matrix
     try:
         return _factorized(A_sp)
     except RuntimeError:
-        # Rank-deficient — use sparse LSQR per RHS vector.
-        # O(nnz * n_iter) per solve, stays sparse, no dense allocation.
-        import scipy.sparse.linalg as _spla
-        A_csc = A_sp.tocsc()
-        def _solve_lsqr(b):
-            return _spla.lsqr(A_csc, np.asarray(b).ravel(),
-                              atol=1e-14, btol=1e-14)[0]
-        return _solve_lsqr
+        pass
+
+    # Drop zero-diagonal columns (groups with no control obs)
+    diag = np.array(A_sp.diagonal()).ravel()
+    live = np.where(diag > 0)[0]
+
+    if len(live) == 0:
+        return lambda b: np.zeros(n_full, dtype=np.float64)
+
+    A_reduced = A_sp[np.ix_(live, live)].tocsc()
+
+    # Try 2: sparse LU on reduced matrix
+    try:
+        _solve_reduced = _factorized(A_reduced)
+        def _solve_padded(b):
+            b_arr = np.asarray(b).ravel()
+            x_reduced = _solve_reduced(b_arr[live])
+            x_full = np.zeros(n_full, dtype=np.float64)
+            x_full[live] = x_reduced
+            return x_full
+        return _solve_padded
+    except RuntimeError:
+        pass
+
+    # Try 3: sparse LSQR on reduced matrix (handles any rank deficiency)
+    def _solve_lsqr(b):
+        b_arr = np.asarray(b).ravel()
+        x_reduced = _spla.lsqr(A_reduced, b_arr[live],
+                                atol=1e-10, btol=1e-10)[0]
+        x_full = np.zeros(n_full, dtype=np.float64)
+        x_full[live] = x_reduced
+        return x_full
+
+    return _solve_lsqr
 
 
 # ===================================================================
