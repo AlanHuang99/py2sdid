@@ -34,18 +34,28 @@ def _robust_factorized(A_sp):
     """Factorize a sparse symmetric matrix for repeated solves.
 
     Tries sparse LU first (fast for large well-conditioned systems).
-    Falls back to dense pseudo-inverse when rank-deficient (common in
-    RCS data where some groups have no control observations).
+    Falls back to sparse LSQR when rank-deficient (common in RCS data
+    where some groups have no control observations).
 
-    Returns a callable ``solve(b)`` that computes ``A^{-1} b``.
+    The LSQR fallback stays sparse — no dense allocation — making it
+    feasible for large systems (40K+ groups) where the previous dense
+    pseudo-inverse fallback would exhaust memory.
+
+    Returns a callable ``solve(b)`` that computes ``A^{-1} b``
+    (or the minimum-norm least-squares solution when rank-deficient).
     """
     from scipy.sparse.linalg import factorized as _factorized
     try:
         return _factorized(A_sp)
     except RuntimeError:
-        # Rank-deficient — fall back to dense pseudo-inverse
-        A_pinv = robust_solve(A_sp.toarray(), np.eye(A_sp.shape[0]))
-        return lambda b: A_pinv @ b
+        # Rank-deficient — use sparse LSQR per RHS vector.
+        # O(nnz * n_iter) per solve, stays sparse, no dense allocation.
+        import scipy.sparse.linalg as _spla
+        A_csc = A_sp.tocsc()
+        def _solve_lsqr(b):
+            return _spla.lsqr(A_csc, np.asarray(b).ravel(),
+                              atol=1e-14, btol=1e-14)[0]
+        return _solve_lsqr
 
 
 # ===================================================================
@@ -599,9 +609,8 @@ def _cluster_vcov(IF: np.ndarray, cluster: np.ndarray) -> np.ndarray:
     # Vectorized: sum IF within each cluster using bincount
     # cluster_sums[k, c] = sum of IF[k, i] for i in cluster c
     cluster_sums = np.zeros((K, n_cl), dtype=np.float64)
-    # Map cluster IDs to 0..n_cl-1
-    cl_map = {c: j for j, c in enumerate(unique_clusters)}
-    cl_idx = np.array([cl_map[c] for c in cluster])
+    # Map cluster IDs to 0..n_cl-1 (vectorized via searchsorted)
+    cl_idx = np.searchsorted(unique_clusters, cluster)
 
     for k in range(K):
         cluster_sums[k] = np.bincount(cl_idx, weights=IF[k], minlength=n_cl)
