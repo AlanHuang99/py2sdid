@@ -51,6 +51,87 @@ Both produce identical point estimates. They differ in the analytic standard err
 
 ---
 
+## Dataset Types
+
+py2sdid supports three data configurations through the `dataset_type` and `groupname` parameters.
+
+### 1. Panel Data (default)
+
+Same units tracked over time. Each unit has one row per period. Unit fixed effects are estimated from `idname`.
+
+```python
+# unit_id | year | cohort | dep_var
+# --------|------|--------|--------
+# 1       | 2000 | 2005   | 4.23     <- unit 1 in 2000
+# 1       | 2001 | 2005   | 4.51     <- same unit 1 in 2001
+# ...
+
+result = py2sdid.ts_did(
+    data,
+    yname="dep_var",
+    idname="unit_id",        # unit identifier (used for unit FE)
+    tname="year",
+    gname="cohort",
+)
+```
+
+### 2. Individual-Level Repeated Cross-Section
+
+A fresh sample of individuals is drawn each period from the same groups (e.g., states, regions). Treatment is at the group level. Each individual typically appears only once. Group fixed effects replace unit fixed effects.
+
+```python
+# individual_id | state | year | cohort | dep_var
+# --------------|-------|------|--------|--------
+# 1001          | CA    | 2000 | 2005   | 4.23    <- individual 1001, sampled once
+# 1002          | CA    | 2000 | 2005   | 3.87    <- different individual, same state
+# 2001          | CA    | 2001 | 2005   | 4.60    <- new sample in 2001
+# ...
+
+result = py2sdid.ts_did(
+    data,
+    yname="dep_var",
+    idname="individual_id",  # individual identifier (for observation tracking)
+    tname="year",
+    gname="cohort",
+    dataset_type="rcs",      # repeated cross-section mode
+    groupname="state",       # group FE estimated from this column
+)
+```
+
+Key behavior:
+- **Fixed effects** estimated from `groupname` (not `idname`)
+- **Clustering** defaults to `groupname` (not `idname`)
+- **Validation** checks `gname` is constant within each group
+
+### 3. Aggregated Repeated Cross-Section
+
+Each row is already a group-period aggregate (e.g., state-year means). `idname` IS the group identifier. No separate `groupname` needed.
+
+```python
+# state | year | cohort | dep_var
+# ------|------|--------|--------
+# CA    | 2000 | 2005   | 4.05     <- state-year average
+# CA    | 2001 | 2005   | 4.15
+# TX    | 2000 | 0      | 3.82     <- never-treated state
+# ...
+
+result = py2sdid.ts_did(
+    data,
+    yname="dep_var",
+    idname="state",          # group identifier (used for group FE)
+    tname="year",
+    gname="cohort",
+    dataset_type="rcs",      # group FE mode (no unit tracking needed)
+)
+```
+
+Key behavior:
+- **Fixed effects** estimated from `idname` (which IS the group)
+- **Clustering** defaults to `idname`
+- Functionally identical to panel mode but semantically distinct
+
+---
+
 ## Parameters
 
 ### `ts_did()` / `bjs_did()`
@@ -58,22 +139,25 @@ Both produce identical point estimates. They differ in the analytic standard err
 ```python
 ts_did(
     data, yname, idname, tname, gname,
-    *, xformla=None, wname=None, cluster_var=None,
-    anticipation=0, se=True, bootstrap=False,
+    *, dataset_type="panel", groupname=None,
+    xformla=None, wname=None, cluster_var=None,
+    se=True, bootstrap=False,
     n_bootstraps=500, seed=None, n_jobs=None, verbose=True,
 ) -> DiDResult
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `data` | `pl.DataFrame` | required | Panel data in long format (one row per unit per period) |
+| `data` | `pl.DataFrame` | required | Data in long format |
 | `yname` | `str` | required | Outcome variable column |
-| `idname` | `str` | required | Unit identifier column |
+| `idname` | `str` | required | Unit identifier (panel) or group identifier (aggregated RCS) |
 | `tname` | `str` | required | Time period column (integer-valued) |
 | `gname` | `str` | required | Treatment cohort column (see below) |
+| `dataset_type` | `str` | `"panel"` | `"panel"` or `"rcs"` |
+| `groupname` | `str` | `None` | Group column for individual-level RCS (must not be set when `dataset_type="panel"`) |
 | `xformla` | `list[str]` | `None` | Time-varying covariate columns for the first stage |
 | `wname` | `str` | `None` | Observation weight column |
-| `cluster_var` | `str` | `idname` | Column to cluster standard errors on |
+| `cluster_var` | `str` | auto | Column to cluster SEs on. Defaults to `idname` (panel), `groupname` (individual RCS), or `idname` (aggregated RCS) |
 | `se` | `bool` | `True` | Compute standard errors |
 | `bootstrap` | `bool` | `False` | Use cluster bootstrap instead of analytic SEs |
 | `n_bootstraps` | `int` | `500` | Number of bootstrap replications |
@@ -83,14 +167,14 @@ ts_did(
 
 ### The `gname` Column
 
-The `gname` column encodes the treatment cohort for each unit — the time period when treatment begins.
+The `gname` column encodes the treatment cohort — the time period when treatment begins.
 
-- An integer value (e.g. `2000`) means the unit first receives treatment in that period.
-- `0` or `null` means the unit is never treated.
-- All observations for a given unit should have the same `gname` value.
+- An integer value (e.g. `2000`) means the unit/group first receives treatment in that period.
+- `0` or `null` means never treated.
+- Must be constant within each unit (panel) or group (RCS).
 
 The estimator uses this to determine:
-- Which observations are untreated (used in the first stage): all observations where `tname < gname`, plus all observations from never-treated units.
+- Which observations are untreated (used in the first stage): all observations where `tname < gname`, plus all observations from never-treated units/groups.
 - Which observations are treated (used for treatment effect estimation): observations where `tname >= gname`.
 - The relative time (event time) for each observation: `tname - gname`.
 
@@ -129,24 +213,24 @@ Convenience properties:
 
 ## Data Format
 
-Input: `polars.DataFrame` in long panel format.
+Input: `polars.DataFrame` in long format. The required columns depend on the dataset type.
+
+**Panel data:**
 
 | Column | Type | Description |
 |--------|------|-------------|
 | outcome | float | Outcome variable |
-| unit id | int/str | Unit identifier |
+| unit id | int/str | Unit identifier (appears in multiple periods) |
 | time | int | Time period (e.g. year) |
 | cohort | int | Treatment cohort (0 or null = never-treated) |
 
-```
-unit_id | year | cohort_year | dep_var
---------|------|-------------|--------
-1       | 1990 | 2000        | 4.23
-1       | 1991 | 2000        | 4.51
-...
-501     | 1990 | 0           | 3.82
-501     | 1991 | 0           | 3.90
-```
+**Individual-level RCS** (additional column):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| group | int/str | Group identifier (e.g. state) for fixed effects |
+
+**Aggregated RCS:** Same as panel, but unit id is the group identifier and each (group, time) pair has one row.
 
 ---
 
@@ -173,7 +257,8 @@ with `n_jobs` scales linearly across cores.
 ## Testing
 
 ```bash
-uv run pytest tests/                    # 68 tests
+uv run pytest tests/                    # full suite (106 tests)
+uv run pytest tests/test_rcs.py -v      # RCS-specific tests (38 tests)
 uv run pytest tests/test_vs_r.py -v -s  # R validation (requires R + did2s + didimputation)
 ```
 

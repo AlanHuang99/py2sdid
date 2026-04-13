@@ -1,0 +1,46 @@
+{
+  "seed": 20260413,
+  "n_groups": 50,
+  "n_individuals_per_cell": 30,
+  "panel": [
+    2000,
+    2015
+  ],
+  "cohorts": {
+    "2005": 15,
+    "2010": 10
+  },
+  "never_treated_groups": 25,
+  "te": {
+    "2005": 2.0,
+    "2010": 3.0
+  },
+  "te_m": {
+    "2005": 0.0,
+    "2010": 0.0
+  },
+  "individual_shape": [
+    24000,
+    6
+  ],
+  "aggregated_shape": [
+    800,
+    6
+  ],
+  "individual_columns": [
+    "individual_id",
+    "group",
+    "region",
+    "year",
+    "g",
+    "dep_var"
+  ],
+  "aggregated_columns": [
+    "group",
+    "year",
+    "g",
+    "region",
+    "dep_var",
+    "n_obs"
+  ]
+}

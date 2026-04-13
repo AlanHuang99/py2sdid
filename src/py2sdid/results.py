@@ -59,6 +59,21 @@ class PanelData:
     time_map: dict[int, Any]
     cluster_map: dict[int, Any]
 
+    # Fixed-effect structure (defaults match panel mode for backward compat)
+    fe_ids: np.ndarray | None = None        # integer-coded FE identifiers (= unit_ids for panel, group_ids for RCS)
+    n_fe_levels: int | None = None          # number of FE levels (= n_units for panel, n_groups for RCS)
+    fe_map: dict[int, Any] | None = None    # FE code -> original label
+    is_rcs: bool = False                    # True when groupname was provided
+
+    def __post_init__(self) -> None:
+        """Default fe_ids to unit_ids for backward compatibility."""
+        if self.fe_ids is None:
+            self.fe_ids = self.unit_ids
+        if self.n_fe_levels is None:
+            self.n_fe_levels = self.n_units
+        if self.fe_map is None:
+            self.fe_map = self.unit_map
+
 
 # ---------------------------------------------------------------------------
 # FirstStageResult
@@ -288,13 +303,22 @@ class DiDResult:
         lines.append(f"py2sdid estimation results ({self.method})")
         lines.append("=" * 60)
         lines.append(f"Method: {method_label}")
-        lines.append(
-            f"Observations: {p.n_obs:,}  (N={p.n_units}, T={p.n_periods})"
-        )
-        lines.append(
-            f"Treated: {n_treated_units} units ({p.n_treated} obs)     "
-            f"Cohorts: {n_cohorts}"
-        )
+        if p.is_rcs:
+            lines.append(
+                f"Observations: {p.n_obs:,}  (G={p.n_fe_levels}, T={p.n_periods})"
+            )
+            lines.append(
+                f"Treated: {p.n_treated} obs     "
+                f"Cohorts: {n_cohorts}  (repeated cross-section)"
+            )
+        else:
+            lines.append(
+                f"Observations: {p.n_obs:,}  (N={p.n_units}, T={p.n_periods})"
+            )
+            lines.append(
+                f"Treated: {n_treated_units} units ({p.n_treated} obs)     "
+                f"Cohorts: {n_cohorts}"
+            )
         lines.append(f"Clustering: {cluster_label}")
         lines.append("")
 

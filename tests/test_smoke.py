@@ -160,7 +160,7 @@ def test_gname_varying_within_unit_raises():
         .otherwise(pl.col("g"))
         .alias("g")
     ).drop("_idx")
-    with pytest.raises(ValueError, match="constant within each unit"):
+    with pytest.raises(ValueError, match="constant within each"):
         ts_did(bad, yname="dep_var", idname="unit", tname="year", gname="g",
                se=False, verbose=False)
 

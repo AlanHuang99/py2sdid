@@ -30,6 +30,24 @@ from .results import (
 )
 
 
+def _robust_factorized(A_sp):
+    """Factorize a sparse symmetric matrix for repeated solves.
+
+    Tries sparse LU first (fast for large well-conditioned systems).
+    Falls back to dense pseudo-inverse when rank-deficient (common in
+    RCS data where some groups have no control observations).
+
+    Returns a callable ``solve(b)`` that computes ``A^{-1} b``.
+    """
+    from scipy.sparse.linalg import factorized as _factorized
+    try:
+        return _factorized(A_sp)
+    except RuntimeError:
+        # Rank-deficient — fall back to dense pseudo-inverse
+        A_pinv = robust_solve(A_sp.toarray(), np.eye(A_sp.shape[0]))
+        return lambda b: A_pinv @ b
+
+
 # ===================================================================
 # did2s influence-function SEs  (Gardner 2021)
 # ===================================================================
@@ -102,14 +120,13 @@ def compute_se_did2s(
     # Key optimization: X10'X10 is very sparse (fill ~0.2% for large N).
     # Use sparse LU factorization instead of dense Cholesky — this is
     # O(nnz^1.5) instead of O(N^3), giving 100-200x speedup at scale.
-    from scipy.sparse.linalg import factorized as _factorized
-
+    # Falls back to pseudo-inverse for rank-deficient systems (RCS data).
     X10tX10_sp = (X10w.T @ X10w).tocsc()
     X1tX2 = X1w.T @ X2w
     if sp.issparse(X1tX2):
         X1tX2 = X1tX2.toarray() if hasattr(X1tX2, 'toarray') else np.asarray(X1tX2)
 
-    _solve = _factorized(X10tX10_sp)  # factorize once, reuse for all RHS
+    _solve = _robust_factorized(X10tX10_sp)
     gamma_hat = np.column_stack([_solve(X1tX2[:, j]) for j in range(X1tX2.shape[1])])
 
     # IF_fs: first-stage contribution via sparse matmul
@@ -199,14 +216,13 @@ def compute_se_bjs(
     # Eq 6: v* = -Z @ solve(Z0'Z0, Z1' @ wtr_treated)
     # Use sparse factorized solve — Z0'Z0 is very sparse (same structure
     # as X10'X10 in did2s) and this avoids the O(N^3) dense Cholesky.
-    from scipy.sparse.linalg import factorized as _factorized
-
+    # Falls back to pseudo-inverse for rank-deficient systems (RCS data).
     Z0tZ0_sp = (Z0.T @ Z0).tocsc()
     Z1t_wtr = Z1.T @ wtr_treated  # (p, n_wtr)
     if sp.issparse(Z1t_wtr):
         Z1t_wtr = Z1t_wtr.toarray() if hasattr(Z1t_wtr, 'toarray') else np.asarray(Z1t_wtr)
 
-    _solve_bjs = _factorized(Z0tZ0_sp)
+    _solve_bjs = _robust_factorized(Z0tZ0_sp)
     solved = np.column_stack([_solve_bjs(Z1t_wtr[:, j]) for j in range(Z1t_wtr.shape[1])])
 
     if sp.issparse(Z_w):

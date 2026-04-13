@@ -132,27 +132,40 @@ def _plot_pretrends(result: Any, ax: Any, *, title: str | None = None, **kw: Any
 
 
 def _plot_treatment_status(result: Any, ax: Any, *, title: str | None = None, **kw: Any) -> None:
-    """Treatment status heatmap across units and time."""
+    """Treatment status heatmap across units/groups and time.
+
+    For panel data, rows are individual units.  For RCS data, rows are
+    groups (using ``fe_ids`` / ``n_fe_levels``), which avoids a sparse
+    24,000-row matrix when individuals each appear only once.
+    """
     panel = result.panel
 
-    # Build status matrix (n_units x n_periods)
-    status = np.zeros((panel.n_units, panel.n_periods), dtype=np.float64)
+    # Use fe_ids/n_fe_levels: equals unit_ids/n_units for panels,
+    # group_ids/n_groups for RCS — one code path for all three modes.
+    row_ids = panel.fe_ids
+    n_rows = panel.n_fe_levels
+
+    # Build status matrix (n_rows x n_periods)
+    # For individual RCS, multiple individuals map to the same group row.
+    # We take the max status per cell (treated > not-yet-treated > never).
+    status = np.zeros((n_rows, panel.n_periods), dtype=np.float64)
     for obs_idx in range(panel.n_obs):
-        u = panel.unit_ids[obs_idx]
+        r = row_ids[obs_idx]
         t = panel.time_ids[obs_idx]
         if panel.D[obs_idx] == 1:
-            status[u, t] = 1.0  # treated
+            status[r, t] = 1.0  # treated
         elif panel.cohort[obs_idx] > 0:
-            status[u, t] = 0.5  # not-yet-treated
-        else:
-            status[u, t] = 0.0  # never-treated
+            status[r, t] = max(status[r, t], 0.5)  # not-yet-treated
+        # never-treated stays 0.0
 
     # Sort: never-treated first, then by cohort timing
-    unit_cohort = np.array([
-        panel.cohort[panel.unit_ids == u][0]
-        for u in range(panel.n_units)
-    ])
-    sort_order = np.argsort(unit_cohort)
+    row_cohort = np.zeros(n_rows, dtype=np.float64)
+    for obs_idx in range(panel.n_obs):
+        r = row_ids[obs_idx]
+        c = panel.cohort[obs_idx]
+        if c > 0:
+            row_cohort[r] = c
+    sort_order = np.argsort(row_cohort)
     status = status[sort_order]
 
     import matplotlib.colors as mcolors
@@ -163,7 +176,8 @@ def _plot_treatment_status(result: Any, ax: Any, *, title: str | None = None, **
     time_labels = [panel.time_map.get(t, t) for t in range(panel.n_periods)]
     ax.imshow(status, aspect="auto", cmap=cmap, norm=norm, interpolation="nearest")
     ax.set_xlabel("Time period")
-    ax.set_ylabel("Unit (sorted by cohort)")
+    ylabel = "Group (sorted by cohort)" if panel.is_rcs else "Unit (sorted by cohort)"
+    ax.set_ylabel(ylabel)
     ax.set_title(title or "Treatment Status")
 
     # Tick labels (subsample if many)
@@ -176,18 +190,35 @@ def _plot_treatment_status(result: Any, ax: Any, *, title: str | None = None, **
 def _plot_counterfactual(
     result: Any, ax: Any, *, units: list | None = None, title: str | None = None, **kw: Any,
 ) -> None:
-    """Observed vs counterfactual Y(0) for selected units."""
+    """Observed vs counterfactual Y(0) for selected units or groups.
+
+    For panel data, shows individual unit trajectories.  For RCS data,
+    aggregates to group-period means (since individuals appear only
+    once and have no time series).
+    """
     panel = result.panel
+    is_individual_rcs = panel.is_rcs and panel.n_units != panel.n_fe_levels
+
+    if is_individual_rcs:
+        _plot_counterfactual_rcs(result, ax, units=units, title=title)
+    else:
+        _plot_counterfactual_panel(result, ax, units=units, title=title)
+
+
+def _plot_counterfactual_panel(
+    result: Any, ax: Any, *, units: list | None = None, title: str | None = None,
+) -> None:
+    """Counterfactual for panel or aggregated RCS (one row per unit-period)."""
+    panel = result.panel
+    entity = "Group" if panel.is_rcs else "Unit"
 
     if units is None:
-        # Pick first 3 treated units
         treated_units = np.unique(panel.unit_ids[panel.is_treated])[:3]
         units = [panel.unit_map.get(u, u) for u in treated_units]
 
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
 
     for i, uid in enumerate(units):
-        # Find integer code for this unit
         code = None
         for k, v in panel.unit_map.items():
             if v == uid:
@@ -200,22 +231,78 @@ def _plot_counterfactual(
         t_idx = panel.time_ids[mask]
         t_vals = np.array([panel.time_map.get(t, t) for t in t_idx])
         y_actual = panel.Y[mask]
-
-        # Use first-stage prediction as counterfactual (includes covariates)
         y_cf = result.y_hat[mask]
 
         color = colors[i % len(colors)]
-        ax.plot(t_vals, y_actual, "-", color=color, linewidth=1.5, label=f"Unit {uid} (actual)")
-        ax.plot(t_vals, y_cf, "--", color=color, linewidth=1.5, alpha=0.7, label=f"Unit {uid} (Y(0))")
+        ax.plot(t_vals, y_actual, "-", color=color, linewidth=1.5,
+                label=f"{entity} {uid} (actual)")
+        ax.plot(t_vals, y_cf, "--", color=color, linewidth=1.5, alpha=0.7,
+                label=f"{entity} {uid} (Y(0))")
 
-        # Treatment onset
         cohort_val = panel.cohort[mask][0]
         if cohort_val > 0:
             ax.axvline(cohort_val, color=color, linestyle=":", linewidth=0.8, alpha=0.5)
 
     ax.set_xlabel("Time")
     ax.set_ylabel("Outcome")
-    ax.set_title(title or "Counterfactual Comparison")
+    ax.set_title(title or f"Counterfactual Comparison")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+
+def _plot_counterfactual_rcs(
+    result: Any, ax: Any, *, units: list | None = None, title: str | None = None,
+) -> None:
+    """Counterfactual for individual-level RCS.
+
+    Aggregates Y and Y_hat to group-period means, then plots group
+    trajectories (actual vs counterfactual).
+    """
+    panel = result.panel
+    fe_map = panel.fe_map if panel.fe_map is not None else panel.unit_map
+
+    if units is None:
+        # Pick first 3 treated groups
+        treated_groups = np.unique(panel.fe_ids[panel.is_treated])[:3]
+        units = [fe_map.get(g, g) for g in treated_groups]
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+
+    for i, gid in enumerate(units):
+        # Find integer code for this group
+        code = None
+        for k, v in fe_map.items():
+            if v == gid:
+                code = k
+                break
+        if code is None:
+            continue
+
+        group_mask = panel.fe_ids == code
+        group_time = panel.time_ids[group_mask]
+        group_y = panel.Y[group_mask]
+        group_yhat = result.y_hat[group_mask]
+
+        # Aggregate to period means within this group
+        unique_t = np.unique(group_time)
+        t_vals = np.array([panel.time_map.get(t, t) for t in unique_t])
+        y_mean = np.array([group_y[group_time == t].mean() for t in unique_t])
+        yhat_mean = np.array([group_yhat[group_time == t].mean() for t in unique_t])
+
+        color = colors[i % len(colors)]
+        ax.plot(t_vals, y_mean, "-", color=color, linewidth=1.5,
+                label=f"Group {gid} (actual)")
+        ax.plot(t_vals, yhat_mean, "--", color=color, linewidth=1.5, alpha=0.7,
+                label=f"Group {gid} (Y(0))")
+
+        # Treatment onset for this group
+        cohort_val = panel.cohort[group_mask][0]
+        if cohort_val > 0:
+            ax.axvline(cohort_val, color=color, linestyle=":", linewidth=0.8, alpha=0.5)
+
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Outcome (group mean)")
+    ax.set_title(title or "Counterfactual Comparison (group means)")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 

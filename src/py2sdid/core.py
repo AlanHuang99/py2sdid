@@ -30,6 +30,8 @@ def ts_did(
     tname: str,
     gname: str,
     *,
+    dataset_type: str = "panel",
+    groupname: str | None = None,
     xformla: list[str] | None = None,
     wname: str | None = None,
     cluster_var: str | None = None,
@@ -47,29 +49,51 @@ def ts_did(
     Standard errors are computed via GMM influence functions that correct
     for the generated-regressor problem.
 
+    Supports three data configurations:
+
+    1. **Panel** (``dataset_type="panel"``): Same units tracked over
+       time. Unit fixed effects estimated from ``idname``.
+    2. **Individual-level RCS** (``dataset_type="rcs"``,
+       ``groupname="state"``): Fresh individuals each period, grouped
+       by a higher-level variable. Group fixed effects from
+       ``groupname``; ``idname`` identifies individuals.
+    3. **Aggregated RCS** (``dataset_type="rcs"``, no ``groupname``):
+       Each row is a group-period observation.  ``idname`` IS the
+       group and is used for group fixed effects.
+
     Parameters
     ----------
     data : pl.DataFrame
-        Panel data in long format (one row per unit per period).
+        Data in long format.
     yname : str
         Outcome variable column name.
     idname : str
-        Unit identifier column name.
+        Unit identifier column name. For aggregated RCS, this is
+        the group identifier.
     tname : str
         Time period column name (integer-valued).
     gname : str
         Treatment cohort column name. Each value indicates the time
-        period when treatment begins for that unit. Use ``0`` or
-        ``null`` for never-treated units.
+        period when treatment begins. Use ``0`` or ``null`` for
+        never-treated units/groups.
+    dataset_type : str
+        ``"panel"`` (default) for balanced/unbalanced panel data with
+        unit fixed effects. ``"rcs"`` for repeated cross-section data
+        with group fixed effects.
+    groupname : str, optional
+        Group identifier for individual-level RCS data.  Required
+        when ``dataset_type="rcs"`` and each row represents an
+        individual (not a group-period aggregate).  Group fixed
+        effects replace unit fixed effects. Must not be provided
+        when ``dataset_type="panel"``.
     xformla : list[str], optional
         Time-varying covariate column names to include in the first
-        stage alongside unit and time fixed effects.
+        stage alongside fixed effects.
     wname : str, optional
-        Observation weight column name. Weights are applied in both
-        the first-stage estimation and the treatment effect aggregation.
+        Observation weight column name.
     cluster_var : str, optional
         Column to cluster standard errors on. Defaults to ``idname``
-        (unit-level clustering).
+        (panel) or ``groupname``/``idname`` (RCS).
     se : bool
         Whether to compute standard errors, confidence intervals, and
         p-values.
@@ -101,6 +125,8 @@ def ts_did(
         gname=gname,
         method_name="ts_did",
         se_method_fn=compute_se_did2s,
+        dataset_type=dataset_type,
+        groupname=groupname,
         xformla=xformla,
         wname=wname,
         cluster_var=cluster_var,
@@ -120,6 +146,8 @@ def bjs_did(
     tname: str,
     gname: str,
     *,
+    dataset_type: str = "panel",
+    groupname: str | None = None,
     xformla: list[str] | None = None,
     wname: str | None = None,
     cluster_var: str | None = None,
@@ -149,6 +177,8 @@ def bjs_did(
         gname=gname,
         method_name="bjs_did",
         se_method_fn=compute_se_bjs,
+        dataset_type=dataset_type,
+        groupname=groupname,
         xformla=xformla,
         wname=wname,
         cluster_var=cluster_var,
@@ -174,6 +204,8 @@ def _run_estimation(
     gname: str,
     method_name: str,
     se_method_fn: Any,
+    dataset_type: str,
+    groupname: str | None,
     xformla: list[str] | None,
     wname: str | None,
     cluster_var: str | None,
@@ -186,12 +218,25 @@ def _run_estimation(
 ) -> DiDResult:
     """Shared estimation pipeline for both ts_did and bjs_did."""
 
+    # -- Validate dataset_type / groupname combination -------------------
+    if dataset_type not in ("panel", "rcs"):
+        raise ValueError(
+            f"dataset_type must be 'panel' or 'rcs', got {dataset_type!r}"
+        )
+    if dataset_type == "panel" and groupname is not None:
+        raise ValueError(
+            "groupname must not be provided when dataset_type='panel'. "
+            "Use dataset_type='rcs' for repeated cross-section data."
+        )
+
     if n_jobs is None:
         n_jobs = os.cpu_count() or 1
 
     # Step 1: Panel preparation
+    is_rcs = dataset_type == "rcs"
     if verbose:
-        print(f"py2sdid [{method_name}]: preparing panel...", flush=True)
+        label = "repeated cross-section" if is_rcs else "panel"
+        print(f"py2sdid [{method_name}]: preparing {label}...", flush=True)
 
     panel = prepare_panel(
         data,
@@ -199,6 +244,8 @@ def _run_estimation(
         idname=idname,
         tname=tname,
         gname=gname,
+        dataset_type=dataset_type,
+        groupname=groupname,
         xformla=xformla,
         wname=wname,
         cluster_var=cluster_var,
@@ -206,11 +253,19 @@ def _run_estimation(
 
     if verbose:
         n_cohorts = len([c for c in panel.cohort_sizes if c != 0])
-        print(
-            f"  {panel.n_units} units, {panel.n_periods} periods, "
-            f"{panel.n_treated} treated obs, {n_cohorts} cohort(s)",
-            flush=True,
-        )
+        if panel.is_rcs:
+            print(
+                f"  {panel.n_obs} obs, {panel.n_fe_levels} groups, "
+                f"{panel.n_periods} periods, "
+                f"{panel.n_treated} treated obs, {n_cohorts} cohort(s)",
+                flush=True,
+            )
+        else:
+            print(
+                f"  {panel.n_units} units, {panel.n_periods} periods, "
+                f"{panel.n_treated} treated obs, {n_cohorts} cohort(s)",
+                flush=True,
+            )
 
     # Step 2: First stage
     if verbose:
