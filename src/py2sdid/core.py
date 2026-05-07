@@ -7,7 +7,7 @@ Provides the two public entry points ``ts_did()`` and ``bjs_did()``.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import polars as pl
@@ -17,6 +17,7 @@ from .first_stage import estimate_first_stage
 from .inference import compute_se_bjs, compute_se_did2s, run_bootstrap
 from .panel import prepare_panel
 from .results import DiDResult, EffectsResult, InferenceResult, PanelData
+from .diagnostics import run_diagnostics, validate_diagnostics_request
 
 
 # ===================================================================
@@ -41,6 +42,8 @@ def ts_did(
     n_bootstraps: int = 500,
     seed: int | None = None,
     n_jobs: int | None = None,
+    diagnostics: Literal["none", "full"] | list[str] = "none",
+    diagnostics_options: dict[str, Any] | None = None,
     verbose: bool = True,
 ) -> DiDResult:
     """Two-stage Difference-in-Differences (Gardner 2021).
@@ -116,6 +119,13 @@ def ts_did(
         number of available CPU cores.
     verbose : bool
         Print step-by-step progress to stdout.
+    diagnostics : {"none", "full"} or list[str]
+        Fit-time diagnostics to run after estimation. ``"none"`` is the
+        default. ``"full"`` runs all configured diagnostics; a list such as
+        ``["pretrend_f", "tost", "placebo"]`` requests strict names.
+    diagnostics_options : dict, optional
+        Options passed to ``run_diagnostics()``, such as ``delta`` and
+        ``placebo_period``.
 
     Returns
     -------
@@ -143,6 +153,8 @@ def ts_did(
         n_bootstraps=n_bootstraps,
         seed=seed,
         n_jobs=n_jobs,
+        diagnostics=diagnostics,
+        diagnostics_options=diagnostics_options,
         verbose=verbose,
     )
 
@@ -165,6 +177,8 @@ def bjs_did(
     n_bootstraps: int = 500,
     seed: int | None = None,
     n_jobs: int | None = None,
+    diagnostics: Literal["none", "full"] | list[str] = "none",
+    diagnostics_options: dict[str, Any] | None = None,
     verbose: bool = True,
 ) -> DiDResult:
     """BJS Imputation Estimator (Borusyak, Jaravel, Spiess 2024).
@@ -197,6 +211,8 @@ def bjs_did(
         n_bootstraps=n_bootstraps,
         seed=seed,
         n_jobs=n_jobs,
+        diagnostics=diagnostics,
+        diagnostics_options=diagnostics_options,
         verbose=verbose,
     )
 
@@ -225,6 +241,8 @@ def _run_estimation(
     n_bootstraps: int,
     seed: int | None,
     n_jobs: int | None,
+    diagnostics: Literal["none", "full"] | list[str],
+    diagnostics_options: dict[str, Any] | None,
     verbose: bool,
 ) -> DiDResult:
     """Shared estimation pipeline for both ts_did and bjs_did."""
@@ -239,6 +257,10 @@ def _run_estimation(
             "groupname must not be provided when dataset_type='panel'. "
             "Use dataset_type='rcs' for repeated cross-section data."
         )
+
+    requested_diagnostics = validate_diagnostics_request(
+        diagnostics, diagnostics_options, se,
+    )
 
     if n_jobs is None:
         n_jobs = os.cpu_count() or 1
@@ -336,7 +358,16 @@ def _run_estimation(
             print(f"  SE(ATT) = {inf_result.att_avg_se:.4f}", flush=True)
 
     # Step 5: Assemble result
-    return _build_result(method_name, panel, fs, eff, inf_result, seed, xformla)
+    result = _build_result(method_name, panel, fs, eff, inf_result, seed, xformla)
+
+    if requested_diagnostics is not None:
+        result.diagnostics = run_diagnostics(
+            result,
+            **(diagnostics_options or {}),
+            _requested=requested_diagnostics,
+        )
+
+    return result
 
 
 def _build_result(
@@ -396,4 +427,5 @@ def _build_result(
         panel=panel,
         sigma2=fs.sigma2,
         seed=seed,
+        n_clusters=len(panel.cluster_map),
     )

@@ -159,82 +159,284 @@ class InferenceResult:
 
 
 # ---------------------------------------------------------------------------
-# DiagnosticResult
+# Diagnostic results
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TostResult:
+    """Per-period TOST equivalence results for pre-treatment coefficients."""
+
+    pvals: np.ndarray
+    periods: np.ndarray
+    threshold: float
+    max_pval: float
+    all_pass: bool
+
+    def summary(self, *, alpha: float = 0.05) -> str:
+        """Return a compact text summary."""
+        lines = [f"Equivalence test (TOST): {'PASS' if self.all_pass else 'FAIL'} "
+                 f"(max p = {self.max_pval:.4f})"]
+        lines.append("Per-period equivalence:")
+        for period, pval in zip(self.periods, self.pvals, strict=False):
+            status = "PASS" if float(pval) < alpha else "fail"
+            lines.append(
+                f"  e={int(period):+d}: p={float(pval):.4f} "
+                f"(bound={self.threshold:.4f}) [{status}]"
+            )
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class PretrendFResult:
+    """Joint F-test for all pre-treatment ATTs equal to zero."""
+
+    f_stat: float
+    p_value: float
+    df1: int
+    df2: int
+
+    def summary(self) -> str:
+        """Return a compact text summary."""
+        return (
+            f"Pre-trend F-test: F({self.df1}, {self.df2}) = "
+            f"{self.f_stat:.4f}, p = {self.p_value:.4f}"
+        )
+
+
+@dataclass(frozen=True)
+class EquivFResult:
+    """Joint equivalence F-test result."""
+
+    p_value: float
+    f_threshold: float
+
+    def summary(self) -> str:
+        """Return a compact text summary."""
+        return (
+            f"Equivalence F-test: p = {self.p_value:.4f} "
+            f"(f_threshold={self.f_threshold:.4f})"
+        )
+
+
+@dataclass(frozen=True)
+class PlaceboResult:
+    """Placebo-window mean ATT plus point-null and equivalence p-values."""
+
+    estimate: float
+    se: float
+    p_value: float
+    equiv_p_value: float
+    period: tuple[int, int]
+
+    def summary(self) -> str:
+        """Return a compact text summary."""
+        return (
+            f"Placebo test (window {self.period}): est={self.estimate:.4f}, "
+            f"se={self.se:.4f}, p={self.p_value:.4f}, "
+            f"equiv_p={self.equiv_p_value:.4f}"
+        )
+
+
+@dataclass(frozen=True)
+class HonestDiDResult:
+    """Slim-safe HonestDiD sensitivity grid."""
+
+    M: np.ndarray
+    ci_lower: np.ndarray
+    ci_upper: np.ndarray
+
+    def summary(self) -> str:
+        """Return a compact text summary."""
+        lines = ["HonestDiD sensitivity:"]
+        for M, ci_lower, ci_upper in zip(
+            self.M, self.ci_lower, self.ci_upper, strict=False
+        ):
+            lines.append(
+                f"  M={float(M):.3f}: CI=[{float(ci_lower):.4f}, "
+                f"{float(ci_upper):.4f}]"
+            )
+        return "\n".join(lines)
+
+
+_DIAGNOSTIC_SUMMARY_ORDER = (
+    "pretrend_f", "equiv_f", "tost", "placebo", "honestdid",
+)
+
 
 @dataclass
 class DiagnosticResult:
-    """Container for diagnostic test results.
+    """Slim-safe registry of diagnostic test results.
 
-    Populated by ``diagnostics.run_diagnostics()`` and accessed via
-    ``DiDResult.diagnose()``.
+    The envelope stores only primitives, tuples, dicts, and bounded
+    ``numpy`` arrays.  Compatibility properties synthesize the previous
+    flat attributes and Polars tables on access.
     """
 
-    # Pre-trend F-test
-    pretrend_f_stat: float
-    pretrend_f_pval: float
-    pretrend_df: tuple[int, int]
+    options: dict[str, Any] = field(default_factory=dict)
+    tests: dict[str, Any] = field(default_factory=dict)
 
-    # Equivalence test (TOST)
-    equiv_results: pl.DataFrame | None = None   # rel_time, tost_pval, bound, reject
-    equiv_max_pval: float | None = None         # max TOST p-value across all pre-periods
-    equiv_all_pass: bool | None = None          # True if all pre-periods pass equivalence
+    @property
+    def available(self) -> tuple[str, ...]:
+        """Names of populated diagnostics, with built-ins first."""
+        known = [name for name in _DIAGNOSTIC_SUMMARY_ORDER if name in self.tests]
+        known_set = set(known)
+        extra = sorted(name for name in self.tests if name not in known_set)
+        return tuple(known + extra)
 
-    # Placebo test
-    placebo_results: pl.DataFrame | None = None  # horizon, estimate, se, pval
+    def get(self, name: str, default: Any = None) -> Any:
+        """Return a diagnostic by name, or ``default`` if absent."""
+        return self.tests.get(name, default)
 
-    # HonestDiD sensitivity
-    honestdid_results: pl.DataFrame | None = None  # horizon, M, ci_lower, ci_upper
+    def set_test(self, name: str, value: Any | None) -> None:
+        """Set or remove a diagnostic result by name."""
+        if not name or not isinstance(name, str):
+            raise ValueError("diagnostic name must be a non-empty string")
+        if value is None:
+            self.tests.pop(name, None)
+        else:
+            self.tests[name] = value
+
+    def set(self, name: str, value: Any | None) -> None:
+        """Compatibility shortcut for :meth:`set_test`."""
+        self.set_test(name, value)
+
+    def __contains__(self, name: str) -> bool:
+        return name in self.tests
+
+    def __getitem__(self, name: str) -> Any:
+        return self.tests[name]
+
+    def _typed(self, name: str, typ: type) -> Any | None:
+        value = self.tests.get(name)
+        return value if isinstance(value, typ) else None
+
+    @property
+    def tost(self) -> TostResult | None:
+        return self._typed("tost", TostResult)
+
+    @tost.setter
+    def tost(self, value: TostResult | None) -> None:
+        self.set_test("tost", value)
+
+    @property
+    def pretrend_f(self) -> PretrendFResult | None:
+        return self._typed("pretrend_f", PretrendFResult)
+
+    @pretrend_f.setter
+    def pretrend_f(self, value: PretrendFResult | None) -> None:
+        self.set_test("pretrend_f", value)
+
+    @property
+    def equiv_f(self) -> EquivFResult | None:
+        return self._typed("equiv_f", EquivFResult)
+
+    @equiv_f.setter
+    def equiv_f(self, value: EquivFResult | None) -> None:
+        self.set_test("equiv_f", value)
+
+    @property
+    def placebo(self) -> PlaceboResult | None:
+        return self._typed("placebo", PlaceboResult)
+
+    @placebo.setter
+    def placebo(self, value: PlaceboResult | None) -> None:
+        self.set_test("placebo", value)
+
+    @property
+    def honestdid(self) -> HonestDiDResult | None:
+        return self._typed("honestdid", HonestDiDResult)
+
+    @honestdid.setter
+    def honestdid(self, value: HonestDiDResult | None) -> None:
+        self.set_test("honestdid", value)
+
+    # ------------------------------------------------------------------
+    # Backward-compatible flat fields
+    # ------------------------------------------------------------------
+    @property
+    def pretrend_f_stat(self) -> float:
+        return self.pretrend_f.f_stat if self.pretrend_f is not None else 0.0
+
+    @property
+    def pretrend_f_pval(self) -> float:
+        return self.pretrend_f.p_value if self.pretrend_f is not None else 1.0
+
+    @property
+    def pretrend_df(self) -> tuple[int, int]:
+        if self.pretrend_f is None:
+            return (0, 0)
+        return (self.pretrend_f.df1, self.pretrend_f.df2)
+
+    @property
+    def equiv_results(self) -> pl.DataFrame | None:
+        if self.tost is None:
+            return None
+        alpha = float(self.options.get("alpha", 0.05))
+        return pl.DataFrame({
+            "rel_time": self.tost.periods.astype(int).tolist(),
+            "tost_pval": self.tost.pvals.astype(float).tolist(),
+            "bound": [float(self.tost.threshold)] * len(self.tost.periods),
+            "reject": (self.tost.pvals < alpha).tolist(),
+        })
+
+    @property
+    def equiv_max_pval(self) -> float | None:
+        return self.tost.max_pval if self.tost is not None else None
+
+    @property
+    def equiv_all_pass(self) -> bool | None:
+        return self.tost.all_pass if self.tost is not None else None
+
+    @property
+    def placebo_results(self) -> pl.DataFrame | None:
+        if self.placebo is None:
+            return None
+        return pl.DataFrame([
+            pl.Series("period", [self.placebo.period], dtype=pl.Object),
+            pl.Series("estimate", [self.placebo.estimate]),
+            pl.Series("se", [self.placebo.se]),
+            pl.Series("pval", [self.placebo.p_value]),
+            pl.Series("equiv_pval", [self.placebo.equiv_p_value]),
+        ])
+
+    @property
+    def honestdid_results(self) -> pl.DataFrame | None:
+        if self.honestdid is None:
+            return None
+        return pl.DataFrame({
+            "M": self.honestdid.M.astype(float).tolist(),
+            "ci_lower": self.honestdid.ci_lower.astype(float).tolist(),
+            "ci_upper": self.honestdid.ci_upper.astype(float).tolist(),
+        })
 
     def summary(self) -> str:
         """Return human-readable summary of diagnostic tests."""
         lines = ["Diagnostic Tests", "=" * 50]
+        alpha = float(self.options.get("alpha", 0.05))
 
-        # Pre-trend F-test
-        df1, df2 = self.pretrend_df
-        lines.append(
-            f"Pre-trend F-test: F({df1}, {df2}) = {self.pretrend_f_stat:.4f}, "
-            f"p = {self.pretrend_f_pval:.4f}"
-        )
+        if self.pretrend_f is not None:
+            lines.append(self.pretrend_f.summary())
 
-        # Equivalence TOST
-        if self.equiv_results is not None:
+        if self.equiv_f is not None:
             lines.append("")
-            if self.equiv_max_pval is not None:
-                status = "PASS" if self.equiv_all_pass else "FAIL"
-                lines.append(
-                    f"Equivalence test (TOST): {status} "
-                    f"(max p = {self.equiv_max_pval:.4f})"
-                )
-            lines.append("Per-period equivalence:")
-            for row in self.equiv_results.iter_rows(named=True):
-                status = "PASS" if row["reject"] else "fail"
-                lines.append(
-                    f"  e={row['rel_time']:+d}: p={row['tost_pval']:.4f} "
-                    f"(bound={row['bound']:.4f}) [{status}]"
-                )
+            lines.append(self.equiv_f.summary())
 
-        # Placebo
-        if self.placebo_results is not None:
+        if self.tost is not None:
             lines.append("")
-            lines.append("Placebo test:")
-            for row in self.placebo_results.iter_rows(named=True):
-                lines.append(
-                    f"  e={row['rel_time']:+d}: est={row['estimate']:.4f}, "
-                    f"se={row['se']:.4f}, p={row['pval']:.4f}"
-                )
+            lines.append(self.tost.summary(alpha=alpha))
 
-        # HonestDiD
-        if self.honestdid_results is not None:
+        if self.placebo is not None:
             lines.append("")
-            lines.append("HonestDiD sensitivity:")
-            for row in self.honestdid_results.iter_rows(named=True):
-                lines.append(
-                    f"  M={row['M']:.3f}: CI=[{row['ci_lower']:.4f}, "
-                    f"{row['ci_upper']:.4f}]"
-                )
+            lines.append(self.placebo.summary())
+
+        if self.honestdid is not None:
+            lines.append("")
+            lines.append(self.honestdid.summary())
 
         return "\n".join(lines)
+
+
+Diagnostics = DiagnosticResult
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +481,8 @@ class DiDResult:
     panel: PanelData
     sigma2: float                                   # error variance from first stage
     seed: int | None
+    n_clusters: int | None = None
+    diagnostics: DiagnosticResult | None = None
 
     @property
     def att_by_horizon(self) -> pl.DataFrame:
@@ -290,6 +494,11 @@ class DiDResult:
         """Pre-treatment event-study estimates (rel_time < 0)."""
         pre = self.event_study.filter(pl.col("rel_time") < 0)
         return pre if len(pre) > 0 else None
+
+    @property
+    def bootstrap_atts(self) -> np.ndarray | None:
+        """Compatibility alias for the event-study bootstrap distribution."""
+        return self.boot_dist
 
     def summary(self) -> str:
         """Return formatted summary table of estimation results."""
@@ -422,4 +631,9 @@ class DiDResult:
         """
         from .diagnostics import run_diagnostics
 
-        return run_diagnostics(self, **kwargs)
+        if not kwargs and self.diagnostics is not None:
+            return self.diagnostics
+
+        diag = run_diagnostics(self, **kwargs)
+        self.diagnostics = diag
+        return diag

@@ -25,6 +25,26 @@ Usage::
 __version__ = "0.1.6"
 
 from .core import ts_did, bjs_did
-from .results import DiDResult, DiagnosticResult
+from .results import (
+    DiDResult,
+    DiagnosticResult,
+    Diagnostics,
+    EquivFResult,
+    HonestDiDResult,
+    PlaceboResult,
+    PretrendFResult,
+    TostResult,
+)
 
-__all__ = ["ts_did", "bjs_did", "DiDResult", "DiagnosticResult"]
+__all__ = [
+    "ts_did",
+    "bjs_did",
+    "DiDResult",
+    "DiagnosticResult",
+    "Diagnostics",
+    "TostResult",
+    "PretrendFResult",
+    "EquivFResult",
+    "PlaceboResult",
+    "HonestDiDResult",
+]

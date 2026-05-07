@@ -35,6 +35,18 @@ result = py2sdid.ts_did(
 result.summary()
 result.plot(kind="event_study")
 result.diagnose()
+
+result = py2sdid.bjs_did(
+    data,
+    yname="dep_var",
+    idname="unit_id",
+    tname="year",
+    gname="cohort_year",
+    cluster_var="cluster_id",
+    diagnostics="full",
+    diagnostics_options={"delta": 0.10, "placebo_period": (-3, -1)},
+)
+result.diagnostics.placebo.equiv_p_value
 ```
 
 ## Estimators
@@ -139,10 +151,12 @@ Key behavior:
 ```python
 ts_did(
     data, yname, idname, tname, gname,
-    *, dataset_type="panel", groupname=None,
+    *, dataset_type="panel", groupname=None, drop_singletons=True,
     xformla=None, wname=None, cluster_var=None,
     se=True, bootstrap=False,
-    n_bootstraps=500, seed=None, n_jobs=None, verbose=True,
+    n_bootstraps=500, seed=None, n_jobs=None,
+    diagnostics="none", diagnostics_options=None,
+    verbose=True,
 ) -> DiDResult
 ```
 
@@ -155,6 +169,7 @@ ts_did(
 | `gname` | `str` | required | Treatment cohort column (see below) |
 | `dataset_type` | `str` | `"panel"` | `"panel"` or `"rcs"` |
 | `groupname` | `str` | `None` | Group column for individual-level RCS (must not be set when `dataset_type="panel"`) |
+| `drop_singletons` | `bool` | `True` | Drop FE groups with no control-subsample observations |
 | `xformla` | `list[str]` | `None` | Time-varying covariate columns for the first stage |
 | `wname` | `str` | `None` | Observation weight column |
 | `cluster_var` | `str` | auto | Column to cluster SEs on. Defaults to `idname` (panel), `groupname` (individual RCS), or `idname` (aggregated RCS) |
@@ -163,6 +178,8 @@ ts_did(
 | `n_bootstraps` | `int` | `500` | Number of bootstrap replications |
 | `seed` | `int` | `None` | Random seed for bootstrap |
 | `n_jobs` | `int` | CPU count | Parallel workers for bootstrap |
+| `diagnostics` | `"none"`, `"full"`, or `list[str]` | `"none"` | Fit-time diagnostics to compute and store on `result.diagnostics` |
+| `diagnostics_options` | `dict \| None` | `None` | Options such as `delta`, `placebo_period`, `alpha`, `honestdid_e`, `honestdid_Mvec` |
 | `verbose` | `bool` | `True` | Print progress |
 
 ### The `gname` Column
@@ -194,6 +211,8 @@ Both estimators return a `DiDResult` with these fields:
 | `unit_fe` | `np.ndarray` | Estimated unit fixed effects |
 | `time_fe` | `np.ndarray` | Estimated time fixed effects |
 | `vcov` | `np.ndarray` | Variance-covariance matrix |
+| `boot_dist` | `np.ndarray \| None` | Bootstrap distribution for event-study ATTs |
+| `diagnostics` | `DiagnosticResult \| None` | Fit-time or cached diagnostics |
 
 The `event_study` DataFrame contains columns: `rel_time`, `estimate`, `se`, `ci_lower`, `ci_upper`, `pval`, `count`. It includes all relative time periods present in the data, both pre-treatment and post-treatment.
 
@@ -207,7 +226,25 @@ Convenience properties:
 |--------|-------------|
 | `summary()` | Formatted text summary |
 | `plot(kind)` | Matplotlib figure. Kinds: `event_study`, `pretrends`, `treatment_status`, `counterfactual`, `honestdid`, `calendar` |
-| `diagnose()` | Pre-trend F-test, TOST equivalence, HonestDiD sensitivity |
+| `diagnose()` | Pre-trend F-test, TOST equivalence, optional placebo window, HonestDiD sensitivity |
+
+### Diagnostics
+
+`result.diagnose(delta=0.10, placebo_period=(-3, -1))` returns a slim-safe
+diagnostics envelope with hierarchical fields:
+
+- `diag.pretrend_f.f_stat` and `diag.pretrend_f.p_value`
+- `diag.tost.pvals`, `diag.tost.threshold`, and `diag.tost.max_pval`
+- `diag.placebo.estimate`, `diag.placebo.p_value`, and `diag.placebo.equiv_p_value`
+- `diag.honestdid.M`, `diag.honestdid.ci_lower`, and `diag.honestdid.ci_upper`
+
+The older flat attributes remain available: `diag.pretrend_f_stat`,
+`diag.equiv_results`, `diag.placebo_results`, and `diag.honestdid_results`.
+Calling `diagnose()` caches the envelope on `result.diagnostics`; fit-time
+diagnostics can also populate it directly through `diagnostics="full"` and
+`diagnostics_options={...}`. The cached envelope is safe to retain after
+slimming heavy fields such as `result.panel`, `result.y_hat`, and
+`result.effects`.
 
 ---
 

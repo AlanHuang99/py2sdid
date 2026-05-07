@@ -4,7 +4,7 @@ Diagnostic tests for py2sdid estimation results.
 Implements:
 - Pre-trend F-test (Wald-type joint significance of pre-treatment ATTs)
 - Equivalence test (TOST — two one-sided t-tests per pre-period)
-- Placebo test (re-estimate excluding pre-treatment periods)
+- Placebo test (average ATT over a pre-treatment window)
 - HonestDiD sensitivity (Rambachan & Roth 2021, smoothness-based)
 """
 
@@ -13,11 +13,145 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import polars as pl
 from scipy import stats
-from scipy.optimize import linprog
 
-from .results import DiagnosticResult
+from .results import (
+    DiagnosticResult,
+    HonestDiDResult,
+    PlaceboResult,
+    PretrendFResult,
+    TostResult,
+)
+
+
+_VALID_DIAG_NAMES = {"pretrend_f", "tost", "placebo", "honestdid"}
+_VALID_OPTION_KEYS = {
+    "delta", "alpha", "placebo_period", "honestdid_e", "honestdid_Mvec",
+}
+_DEFAULT_FULL_DIAGNOSTICS = ("pretrend_f", "tost", "honestdid")
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float, np.integer, np.floating))
+        and not isinstance(value, (bool, np.bool_))
+        and np.isfinite(value)
+    )
+
+
+def _is_positive_finite_number(value: Any) -> bool:
+    return _is_finite_number(value) and value > 0
+
+
+def _validate_period_option(name: str, value: Any) -> tuple[int, int]:
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or not _is_finite_number(value[0])
+        or not _is_finite_number(value[1])
+    ):
+        raise ValueError(
+            f"diagnostics_options['{name}'] must be a (start, end) tuple "
+            "of finite numeric periods."
+        )
+    start = int(value[0])
+    end = int(value[1])
+    if start > end:
+        raise ValueError(
+            f"diagnostics_options['{name}'] must have start <= end."
+        )
+    return start, end
+
+
+def _validate_diagnostics_options(options: dict[str, Any]) -> None:
+    if "delta" in options and options["delta"] is not None:
+        if not _is_positive_finite_number(options["delta"]):
+            raise ValueError(
+                "diagnostics_options['delta'] must be a positive finite float."
+            )
+
+    if "alpha" in options:
+        alpha = options["alpha"]
+        if not _is_finite_number(alpha) or not 0 < alpha < 1:
+            raise ValueError(
+                "diagnostics_options['alpha'] must be a finite float in (0, 1)."
+            )
+
+    if "placebo_period" in options and options["placebo_period"] is not None:
+        _validate_period_option("placebo_period", options["placebo_period"])
+
+    if "honestdid_e" in options:
+        honestdid_e = options["honestdid_e"]
+        if isinstance(honestdid_e, bool) or not isinstance(
+            honestdid_e, (int, np.integer)
+        ):
+            raise ValueError("diagnostics_options['honestdid_e'] must be an int.")
+
+    if "honestdid_Mvec" in options and options["honestdid_Mvec"] is not None:
+        Mvec = options["honestdid_Mvec"]
+        if not isinstance(Mvec, list) or not Mvec:
+            raise ValueError(
+                "diagnostics_options['honestdid_Mvec'] must be a non-empty list."
+            )
+        if any(not _is_finite_number(M) or M < 0 for M in Mvec):
+            raise ValueError(
+                "diagnostics_options['honestdid_Mvec'] values must be "
+                "finite non-negative floats."
+            )
+
+
+def validate_diagnostics_request(
+    diagnostics: Any,
+    diagnostics_options: dict | None,
+    se: bool,
+) -> list[str] | None:
+    """Validate fit-time diagnostics before expensive estimation starts."""
+    if diagnostics_options is not None and not isinstance(diagnostics_options, dict):
+        raise ValueError("diagnostics_options must be a dict or None.")
+
+    opts: dict[str, Any] = diagnostics_options or {}
+    bad_keys = set(opts) - _VALID_OPTION_KEYS
+    if bad_keys:
+        raise ValueError(
+            f"unknown diagnostics_options key(s): {sorted(bad_keys)}; "
+            f"valid: {sorted(_VALID_OPTION_KEYS)}"
+        )
+
+    if diagnostics == "none":
+        _validate_diagnostics_options(opts)
+        return None
+
+    if not se:
+        raise ValueError("diagnostics requires se=True.")
+
+    if diagnostics == "full":
+        requested = list(_DEFAULT_FULL_DIAGNOSTICS)
+        if opts.get("placebo_period") is not None:
+            requested.append("placebo")
+    elif isinstance(diagnostics, list):
+        if len(diagnostics) == 0:
+            raise ValueError(
+                "diagnostics=[] is invalid; pass 'none' or a non-empty list."
+            )
+        bad = [name for name in diagnostics if name not in _VALID_DIAG_NAMES]
+        if bad:
+            raise ValueError(
+                f"Unknown diagnostic(s): {bad}; valid: {sorted(_VALID_DIAG_NAMES)}"
+            )
+        if "placebo" in diagnostics and opts.get("placebo_period") is None:
+            raise ValueError(
+                "diagnostics list includes 'placebo' but "
+                "diagnostics_options['placebo_period'] is missing."
+            )
+        requested = list(diagnostics)
+    else:
+        raise ValueError(
+            f"diagnostics must be 'none', 'full', or a list of names; got "
+            f"{diagnostics!r}"
+        )
+
+    _validate_diagnostics_options(opts)
+    return requested
 
 
 def run_diagnostics(
@@ -25,8 +159,10 @@ def run_diagnostics(
     *,
     delta: float | None = None,
     alpha: float = 0.05,
+    placebo_period: tuple[int, int] | None = None,
     honestdid_e: int = 0,
     honestdid_Mvec: list[float] | None = None,
+    _requested: list[str] | None = None,
 ) -> DiagnosticResult:
     """Run all available diagnostic tests.
 
@@ -38,43 +174,76 @@ def run_diagnostics(
         Equivalence bound for TOST.  Default is ``0.36 * sqrt(sigma2)``.
     alpha : float
         Significance level.
+    placebo_period : tuple[int, int], optional
+        Inclusive pre-treatment relative-time window to average for a
+        placebo test.
     honestdid_e : int
         Target event horizon for HonestDiD.
     honestdid_Mvec : list[float], optional
         Smoothness parameter grid for HonestDiD.
     """
+    options: dict[str, Any] = {
+        "delta": delta,
+        "alpha": alpha,
+        "placebo_period": placebo_period,
+        "honestdid_e": honestdid_e,
+        "honestdid_Mvec": honestdid_Mvec,
+    }
+    _validate_diagnostics_options(options)
+
+    requested = set(_requested) if _requested is not None else _VALID_DIAG_NAMES.copy()
+    if bad := requested - _VALID_DIAG_NAMES:
+        raise ValueError(f"Unknown diagnostic(s): {sorted(bad)}")
+
     # -- Pre-trend F-test ------------------------------------------------
-    f_stat, f_pval, f_df = _pretrend_f_test(result, alpha=alpha)
+    diag = DiagnosticResult()
+
+    if "pretrend_f" in requested:
+        f_stat, f_pval, f_df = _pretrend_f_test(result, alpha=alpha)
+        diag.pretrend_f = PretrendFResult(
+            f_stat=f_stat,
+            p_value=f_pval,
+            df1=f_df[0],
+            df2=f_df[1],
+        )
 
     # -- Equivalence TOST ------------------------------------------------
     if delta is None:
         delta = 0.36 * np.sqrt(max(result.sigma2, 1e-10))
-    equiv = _equivalence_test(result, delta=delta, alpha=alpha)
+    if "tost" in requested:
+        diag.tost = _equivalence_test(result, delta=delta, alpha=alpha)
+
+    # -- Placebo ---------------------------------------------------------
+    if "placebo" in requested and placebo_period is not None:
+        diag.placebo = _placebo_test(
+            result, placebo_period=placebo_period, delta=delta,
+        )
 
     # -- HonestDiD -------------------------------------------------------
-    honestdid = None
-    if result.vcov is not None and result.pretrend_tests is not None:
-        honestdid = _honestdid_sensitivity(
+    if (
+        "honestdid" in requested
+        and result.vcov is not None
+        and result.pretrend_tests is not None
+    ):
+        diag.honestdid = _honestdid_sensitivity(
             result, e=honestdid_e, Mvec=honestdid_Mvec, alpha=alpha,
         )
 
-    # Overall equivalence: max p-value across all pre-periods
-    equiv_max_pval = None
-    equiv_all_pass = None
-    if equiv is not None and len(equiv) > 0:
-        equiv_max_pval = float(equiv["tost_pval"].max())
-        equiv_all_pass = bool(equiv["reject"].all())
+    diag.options = {
+        "delta": float(delta),
+        "alpha": float(alpha),
+        "placebo_period": (
+            (int(placebo_period[0]), int(placebo_period[1]))
+            if placebo_period is not None else None
+        ),
+        "honestdid_e": int(honestdid_e),
+        "honestdid_Mvec": (
+            [float(M) for M in honestdid_Mvec]
+            if honestdid_Mvec is not None else None
+        ),
+    }
 
-    return DiagnosticResult(
-        pretrend_f_stat=f_stat,
-        pretrend_f_pval=f_pval,
-        pretrend_df=f_df,
-        equiv_results=equiv,
-        equiv_max_pval=equiv_max_pval,
-        equiv_all_pass=equiv_all_pass,
-        placebo_results=None,
-        honestdid_results=honestdid,
-    )
+    return diag
 
 
 # -------------------------------------------------------------------
@@ -100,7 +269,12 @@ def _pretrend_f_test(
     if k == 0:
         return 0.0, 1.0, (0, 0)
 
-    n_clusters = len(result.panel.cluster_map)
+    n_clusters = getattr(result, "n_clusters", None)
+    panel = getattr(result, "panel", None)
+    if n_clusters is None and panel is not None:
+        n_clusters = len(panel.cluster_map)
+    if n_clusters is None:
+        n_clusters = k + 1
     df2 = max(n_clusters - k, 1)
 
     # Use full vcov submatrix when available (accounts for correlations)
@@ -138,7 +312,7 @@ def _equivalence_test(
     result: Any,
     delta: float,
     alpha: float = 0.05,
-) -> pl.DataFrame | None:
+) -> TostResult | None:
     """Per-horizon TOST: reject if effect is within ±delta of zero."""
     if result.pretrend_tests is None or len(result.pretrend_tests) == 0:
         return None
@@ -152,13 +326,12 @@ def _equivalence_test(
         return None
 
     ses = ses.astype(np.float64)
-    rows = []
+    pvals = np.full(len(estimates), np.nan, dtype=np.float64)
     for i in range(len(estimates)):
         est = estimates[i]
         se = ses[i]
         if se <= 0:
-            rows.append({"rel_time": int(horizons[i]), "tost_pval": 1.0,
-                         "bound": delta, "reject": False})
+            pvals[i] = 1.0
             continue
 
         # Test 1: H0: theta <= -delta  →  t1 = (est + delta) / se
@@ -169,15 +342,99 @@ def _equivalence_test(
         t2 = (est - delta) / se
         p2 = float(stats.norm.cdf(t2))
 
-        tost_pval = max(p1, p2)
-        rows.append({
-            "rel_time": int(horizons[i]),
-            "tost_pval": tost_pval,
-            "bound": delta,
-            "reject": tost_pval < alpha,
-        })
+        pvals[i] = max(p1, p2)
 
-    return pl.DataFrame(rows)
+    finite = pvals[np.isfinite(pvals)]
+    max_pval = float(finite.max()) if finite.size else float("nan")
+    all_pass = bool(finite.size and (finite < alpha).all())
+    return TostResult(
+        pvals=pvals,
+        periods=horizons.astype(int),
+        threshold=float(delta),
+        max_pval=max_pval,
+        all_pass=all_pass,
+    )
+
+
+# -------------------------------------------------------------------
+# Placebo test
+# -------------------------------------------------------------------
+
+def _placebo_test(
+    result: Any,
+    *,
+    placebo_period: tuple[int, int],
+    delta: float,
+) -> PlaceboResult | None:
+    """Average pre-period ATT in a placebo window.
+
+    Uses the bootstrap distribution when available. Falls back to the
+    event-study covariance matrix so analytic-SE fits can still report a
+    Wald-style placebo result.
+    """
+    if result.event_study is None or len(result.event_study) == 0:
+        return None
+
+    start, end = int(placebo_period[0]), int(placebo_period[1])
+    horizons = result.event_study["rel_time"].to_numpy()
+    estimates = result.event_study["estimate"].to_numpy()
+    mask = (horizons >= start) & (horizons <= end) & (horizons < 0)
+    idx = np.where(mask)[0]
+    if len(idx) == 0:
+        return None
+
+    estimate = float(np.mean(estimates[idx]))
+    se = float("nan")
+    p_value = float("nan")
+    equiv_p_value = float("nan")
+
+    boot_dist = getattr(result, "boot_dist", None)
+    if boot_dist is not None:
+        boot_arr = np.asarray(boot_dist, dtype=np.float64)
+        if boot_arr.ndim == 2 and boot_arr.shape[1] == len(horizons):
+            boot_window = boot_arr[:, idx]
+            valid = np.all(np.isfinite(boot_window), axis=1)
+            boot_placebo = np.mean(boot_window[valid], axis=1)
+            if boot_placebo.size:
+                p_value = min(
+                    2 * float(np.mean(boot_placebo >= 0)),
+                    2 * float(np.mean(boot_placebo <= 0)),
+                    1.0,
+                )
+            if boot_placebo.size > 1:
+                se = float(np.std(boot_placebo, ddof=1))
+                if se > 0:
+                    df = boot_placebo.size - 1
+                    t_upper = (estimate - delta) / se
+                    t_lower = (estimate + delta) / se
+                    equiv_p_value = max(
+                        float(stats.t.cdf(t_upper, df)),
+                        float(1 - stats.t.cdf(t_lower, df)),
+                    )
+
+    elif result.vcov is not None:
+        vcov = np.asarray(result.vcov, dtype=np.float64)
+        if vcov.ndim == 2 and vcov.shape == (len(horizons), len(horizons)):
+            weights = np.zeros(len(horizons), dtype=np.float64)
+            weights[idx] = 1.0 / len(idx)
+            var = float(weights @ vcov @ weights)
+            if np.isfinite(var) and var > 0:
+                se = float(np.sqrt(var))
+                p_value = float(2 * stats.norm.sf(abs(estimate) / se))
+                t_upper = (estimate - delta) / se
+                t_lower = (estimate + delta) / se
+                equiv_p_value = max(
+                    float(stats.norm.cdf(t_upper)),
+                    float(1 - stats.norm.cdf(t_lower)),
+                )
+
+    return PlaceboResult(
+        estimate=estimate,
+        se=se,
+        p_value=p_value,
+        equiv_p_value=equiv_p_value,
+        period=(start, end),
+    )
 
 
 # -------------------------------------------------------------------
@@ -189,7 +446,7 @@ def _honestdid_sensitivity(
     e: int = 0,
     Mvec: list[float] | None = None,
     alpha: float = 0.05,
-) -> pl.DataFrame | None:
+) -> HonestDiDResult | None:
     """Simplified smoothness-based HonestDiD sensitivity analysis.
 
     For a grid of M values (bound on second differences of the bias),
@@ -200,18 +457,16 @@ def _honestdid_sensitivity(
     approach.  Results should be interpreted as approximate.  For
     authoritative sensitivity analysis, use the R ``HonestDiD`` package.
     """
-    if result.att_by_horizon is None or len(result.att_by_horizon) == 0:
+    if result.event_study is None or len(result.event_study) == 0:
         return None
 
-    horizons = result.att_by_horizon["rel_time"].to_numpy()
-    estimates = result.att_by_horizon["estimate"].to_numpy()
+    horizons = result.event_study["rel_time"].to_numpy()
+    estimates = result.event_study["estimate"].to_numpy()
 
     if result.vcov is None:
         return None
 
     vcov = result.vcov
-    n_h = len(horizons)
-
     # Find target index
     target_idx = None
     for i, h in enumerate(horizons):
@@ -221,9 +476,6 @@ def _honestdid_sensitivity(
     if target_idx is None:
         return None
 
-    # Pre-treatment indices (negative horizons)
-    pre_indices = [i for i, h in enumerate(horizons) if h < 0]
-
     if Mvec is None:
         Mvec = [0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
 
@@ -231,7 +483,9 @@ def _honestdid_sensitivity(
     sigma_e = np.sqrt(vcov[target_idx, target_idx])
     beta_e = estimates[target_idx]
 
-    rows = []
+    M_values = []
+    ci_lowers = []
+    ci_uppers = []
     for M in Mvec:
         if M == 0.0:
             # No bias allowed: standard CI
@@ -245,10 +499,12 @@ def _honestdid_sensitivity(
             ci_lo = beta_e - max_bias - z * sigma_e
             ci_hi = beta_e + max_bias + z * sigma_e
 
-        rows.append({
-            "M": M,
-            "ci_lower": float(ci_lo),
-            "ci_upper": float(ci_hi),
-        })
+        M_values.append(float(M))
+        ci_lowers.append(float(ci_lo))
+        ci_uppers.append(float(ci_hi))
 
-    return pl.DataFrame(rows)
+    return HonestDiDResult(
+        M=np.array(M_values, dtype=np.float64),
+        ci_lower=np.array(ci_lowers, dtype=np.float64),
+        ci_upper=np.array(ci_uppers, dtype=np.float64),
+    )

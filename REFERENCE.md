@@ -1,6 +1,6 @@
 # py2sdid API Reference
 
-**Version 0.1.0**
+**Version 0.1.6**
 
 ## Overview
 
@@ -19,9 +19,12 @@ Two-stage DiD estimator. Analytic SEs via GMM influence functions.
 ```python
 ts_did(
     data, yname, idname, tname, gname,
-    *, xformla=None, wname=None, cluster_var=None,
-    anticipation=0, se=True, bootstrap=False,
-    n_bootstraps=500, seed=None, n_jobs=None, verbose=True,
+    *, dataset_type="panel", groupname=None, drop_singletons=True,
+    xformla=None, wname=None, cluster_var=None,
+    se=True, bootstrap=False,
+    n_bootstraps=500, seed=None, n_jobs=None,
+    diagnostics="none", diagnostics_options=None,
+    verbose=True,
 ) -> DiDResult
 ```
 
@@ -40,6 +43,9 @@ BJS imputation estimator. Same signature as `ts_did()`. Identical point estimate
 | `idname` | `str` | required | Unit identifier column |
 | `tname` | `str` | required | Time period column (integer) |
 | `gname` | `str` | required | Treatment cohort column. Value = period when treatment begins. `0` or `null` = never-treated |
+| `dataset_type` | `str` | `"panel"` | `"panel"` or `"rcs"` |
+| `groupname` | `str` | `None` | Group column for individual-level RCS |
+| `drop_singletons` | `bool` | `True` | Drop FE groups with no control-subsample observations |
 | `xformla` | `list[str]` | `None` | Time-varying covariate columns for first stage |
 | `wname` | `str` | `None` | Observation weight column |
 | `cluster_var` | `str` | `idname` | Column to cluster standard errors on |
@@ -48,6 +54,8 @@ BJS imputation estimator. Same signature as `ts_did()`. Identical point estimate
 | `n_bootstraps` | `int` | `500` | Bootstrap replications |
 | `seed` | `int` | `None` | Random seed |
 | `n_jobs` | `int` | CPU count | Parallel workers for bootstrap |
+| `diagnostics` | `"none"`, `"full"`, or `list[str]` | `"none"` | Fit-time diagnostics to compute and store on `result.diagnostics` |
+| `diagnostics_options` | `dict \| None` | `None` | Options such as `delta`, `placebo_period`, `alpha`, `honestdid_e`, `honestdid_Mvec` |
 | `verbose` | `bool` | `True` | Print progress |
 
 ### The `gname` Column
@@ -87,6 +95,8 @@ Returned by `ts_did()` and `bjs_did()`.
 | `boot_dist` | `np.ndarray \| None` | Bootstrap distribution |
 | `panel` | `PanelData` | Panel structure |
 | `sigma2` | `float` | First-stage error variance |
+| `n_clusters` | `int \| None` | Stored cluster count for slim-safe diagnostics |
+| `diagnostics` | `DiagnosticResult \| None` | Fit-time or cached diagnostics |
 
 ### `event_study` DataFrame
 
@@ -108,6 +118,7 @@ Contains per-period treatment effect estimates for every relative time period in
 |----------|---------|-------------|
 | `att_by_horizon` | `pl.DataFrame` | Post-treatment rows of `event_study` (rel_time >= 0) |
 | `pretrend_tests` | `pl.DataFrame \| None` | Pre-treatment rows of `event_study` (rel_time < 0) |
+| `bootstrap_atts` | `np.ndarray \| None` | Alias for `boot_dist` |
 
 ### Methods
 
@@ -115,13 +126,30 @@ Contains per-period treatment effect estimates for every relative time period in
 |--------|---------|-------------|
 | `summary()` | `str` | Formatted text summary |
 | `plot(kind, **kwargs)` | `Figure` | Matplotlib figure |
-| `diagnose(**kwargs)` | `DiagnosticResult` | Diagnostic tests |
+| `diagnose(**kwargs)` | `DiagnosticResult` | Diagnostic tests; caches the result on `result.diagnostics` |
 
 ---
 
 ## `DiagnosticResult`
 
-Returned by `result.diagnose()`.
+Returned by `result.diagnose()` and stored on `result.diagnostics` when
+fit-time diagnostics are requested. The envelope is slim-safe: it stores
+only primitives, tuples, dicts, and bounded `numpy` arrays. Legacy flat
+attributes synthesize Polars tables on access for backward compatibility.
+
+### Hierarchical fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tests` | `dict[str, object]` | Registry of populated diagnostics |
+| `available` | `tuple[str, ...]` | Populated test names |
+| `pretrend_f` | `PretrendFResult \| None` | `f_stat`, `p_value`, `df1`, `df2` |
+| `tost` | `TostResult \| None` | Per-period TOST `pvals`, `periods`, `threshold`, `max_pval`, `all_pass` |
+| `placebo` | `PlaceboResult \| None` | Placebo-window `estimate`, `se`, `p_value`, `equiv_p_value`, `period` |
+| `honestdid` | `HonestDiDResult \| None` | Sensitivity arrays `M`, `ci_lower`, `ci_upper` |
+| `options` | `dict` | Resolved diagnostic options |
+
+### Legacy compatibility attributes
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
@@ -129,7 +157,25 @@ Returned by `result.diagnose()`.
 | `pretrend_f_pval` | `float` | p-value of F-test |
 | `pretrend_df` | `tuple[int, int]` | Degrees of freedom |
 | `equiv_results` | `pl.DataFrame \| None` | TOST results: `rel_time`, `tost_pval`, `bound`, `reject` |
+| `placebo_results` | `pl.DataFrame \| None` | Placebo result: `period`, `estimate`, `se`, `pval`, `equiv_pval` |
 | `honestdid_results` | `pl.DataFrame \| None` | Sensitivity: `M`, `ci_lower`, `ci_upper` |
+
+### Fit-time diagnostics
+
+```python
+result = py2sdid.bjs_did(
+    data, "y", "id", "t", "g",
+    diagnostics="full",
+    diagnostics_options={"delta": 0.10, "placebo_period": (-3, -1)},
+)
+
+result.diagnostics.tost.max_pval
+result.diagnostics.placebo.equiv_p_value
+```
+
+Accepted diagnostic names are `pretrend_f`, `tost`, `placebo`, and
+`honestdid`. `diagnostics=["placebo"]` requires
+`diagnostics_options["placebo_period"]`.
 
 ---
 
@@ -167,7 +213,7 @@ Available for either method via `bootstrap=True`. Resamples clusters with replac
 | `first_stage.py` | Sparse OLS on untreated subsample |
 | `effects.py` | Treatment effect computation |
 | `inference.py` | did2s IF SEs, BJS SEs, bootstrap |
-| `diagnostics.py` | Pre-trend F-test, TOST, HonestDiD |
+| `diagnostics.py` | Pre-trend F-test, TOST, placebo, HonestDiD |
 | `plotting.py` | Matplotlib plots |
 | `results.py` | Dataclasses |
 | `linalg.py` | Sparse FE, robust solve |
