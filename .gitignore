@@ -12,9 +12,7 @@ ref/
 .dev/
 docs/
 CLAUDE.md
-benchmarks/output/
-benchmarks/*.html
-benchmarks/*.csv
+benchmarks/
 tests/data/staggered_panel_large.parquet
 tests/data/staggered_panel_large_metadata.json
 tests/output/
