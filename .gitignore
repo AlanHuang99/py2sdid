@@ -13,6 +13,5 @@ ref/
 docs/
 CLAUDE.md
 benchmarks/
-tests/data/staggered_panel_large.parquet
-tests/data/staggered_panel_large_metadata.json
+tests/data/
 tests/output/
