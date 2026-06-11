@@ -100,7 +100,7 @@ Returned by `ts_did()` and `bjs_did()`.
 
 ### `event_study` DataFrame
 
-Contains per-period treatment effect estimates for every relative time period in the data. Columns:
+Contains per-period estimates for every relative time period in the data. Negative relative times, including `rel_time = -1` when present, are pre-treatment/placebo estimates and are not omitted as a reference period. Post-treatment horizons (`rel_time >= 0`) are imputation/two-stage effects relative to the imputed untreated counterfactual.
 
 | Column | Type | Description |
 |--------|------|-------------|

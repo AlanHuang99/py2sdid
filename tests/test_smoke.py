@@ -54,6 +54,22 @@ def test_event_study_all_periods():
     assert abs(post["estimate"].mean() - 3.0) < 0.5
 
 
+def test_event_study_includes_minus_one_pretrend():
+    """rel_time=-1 is estimated as a pre-treatment/placebo coefficient."""
+    from py2sdid import ts_did
+    df = gen_data(n=600, te1=3.0, te2=3.0)
+    result = ts_did(df, yname="dep_var", idname="unit", tname="year", gname="g",
+                    cluster_var="state", se=False, verbose=False)
+
+    es = result.event_study
+    pre = result.pretrend_tests
+
+    assert (es["rel_time"] == -1).sum() == 1
+    assert pre is not None
+    assert (pre["rel_time"] == -1).sum() == 1
+    assert -1 not in result.att_by_horizon["rel_time"].to_list()
+
+
 def test_ts_did_with_se():
     from py2sdid import ts_did
     df = gen_data(n=600, te1=3.0, te2=3.0)

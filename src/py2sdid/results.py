@@ -122,7 +122,7 @@ class EffectsResult:
     counts: np.ndarray                      # (n_horizons,) obs count per horizon
     effects: np.ndarray                     # (n_treated_obs,) individual tau_it
 
-    # Pre-trend estimates (horizons < 0, excluding reference period)
+    # Pre-trend/placebo estimates for all negative horizons present in the data.
     pretrend_att: np.ndarray | None = None          # (n_pre,) pre-trend ATTs
     pretrend_horizons: np.ndarray | None = None     # (n_pre,) pre-trend horizon labels
 

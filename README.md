@@ -214,7 +214,7 @@ Both estimators return a `DiDResult` with these fields:
 | `boot_dist` | `np.ndarray \| None` | Bootstrap distribution for event-study ATTs |
 | `diagnostics` | `DiagnosticResult \| None` | Fit-time or cached diagnostics |
 
-The `event_study` DataFrame contains columns: `rel_time`, `estimate`, `se`, `ci_lower`, `ci_upper`, `pval`, `count`. It includes all relative time periods present in the data, both pre-treatment and post-treatment.
+The `event_study` DataFrame contains columns: `rel_time`, `estimate`, `se`, `ci_lower`, `ci_upper`, `pval`, `count`. It includes all relative time periods present in the data, both pre-treatment and post-treatment. Negative relative times, including `rel_time = -1` when present, are reported as pre-treatment/placebo estimates rather than omitted as a reference period. Post-treatment horizons (`rel_time >= 0`) are imputation/two-stage effects relative to the imputed untreated counterfactual, not relative to an omitted `-1` event-time coefficient.
 
 Convenience properties:
 - `result.att_by_horizon` — post-treatment rows only (`rel_time >= 0`)
